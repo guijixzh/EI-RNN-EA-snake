@@ -151,7 +151,7 @@ class EIBrainRegion(nn.Module):
         self.W_pred = nn.Parameter(torch.randn(num_columns, num_columns) * 0.1) # 预测其他柱体的状态
         
         # 内部 E-I 动力学参数 (固定基因，模拟保守的生物柱体结构)
-        self.tau_e = 0.9 # 兴奋性记忆保持
+        self.tau_e = 0.7 # 兴奋性记忆保持
         self.w_ei = 2.0  # 抑制强度
         self.w_ie = 2.0  # 兴奋触发抑制的强度
         
@@ -541,7 +541,7 @@ def visualize_brain_ecosystem(brain, env):
 
 if __name__ == "__main__":
     POP_SIZE = 1024 #
-    GENERATIONS = 20 #
+    GENERATIONS = 60 #
     env = SnakeEnv(grid_size=10)
     
     print("Initializing Population...")
