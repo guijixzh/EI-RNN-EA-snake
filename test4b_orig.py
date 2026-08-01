@@ -1,12 +1,10 @@
 import torch
 import torch.nn as nn
 import numpy as np
-import math
 import matplotlib.pyplot as plt
+import copy
 import random
 import time
-import os
-import sys
 import networkx as nx
 import matplotlib.colors as mcolors
 
@@ -16,7 +14,7 @@ import matplotlib.colors as mcolors
 class Config:
     # --- 进化参数 ---
     POP_SIZE = 2048
-    GENERATIONS = 155
+    GENERATIONS = 100
     ELITE_SIZE = 256
     MUT_RATE = 0.05
     TOPOLOGY_MUT_PROB = 0.05
@@ -32,9 +30,8 @@ class Config:
     MAX_STEPS = 500
 
     # --- 脑结构参数 ---
-    NUM_COLUMNS = 256  #原本64
-    # 3 食物方向 bit + 1 食物距离 + 5 射线×2 + 8 自体感知桶 + 2 尾巴局部坐标 = 24
-    OBS_DIM = 24
+    NUM_COLUMNS = 64
+    OBS_DIM = 13              # 3 食物方向 + 5 射线×2 = 13
     ACTION_DIM = 3
     INIT_DENSITY = 0.15
 
@@ -68,13 +65,6 @@ class Config:
     FATIGUE_THRESHOLD = 4     # 允许连续转向的次数（如设为2，则第3次同方向转弯开始受惩罚）
     FATIGUE_MAX = 5.0         # 疲劳上限，防止无限增大
 
-    # --- 检查点 / 断点续训 / 最优模型 / 种子继承 ---
-    CHECKPOINT_PATH = 'test4b_checkpoint.pth'   # 训练中断自动保存的断点文件
-    BEST_MODEL_PATH = 'test4b_best_model.pth'   # 训练完成时保存的最优模型文件
-    AUTO_RESUME = True                          # 启动时自动检测并接续断点
-    CHECKPOINT_INTERVAL = 5                     # 每 N 代自动保存一次（覆盖旧节点）
-    SEED_FROM_BEST = True                       # 全新训练时允许以上一轮最优模型为种群种子
-
 
 # ==========================================
 # 1. 轻量级贪吃蛇环境（射线视野 + 无奖励设计）
@@ -82,7 +72,6 @@ class Config:
 class SnakeEnv:
     def __init__(self, grid_size=10):
         self.grid_size = grid_size
-        self.obs_dim = 24  # 与 Config.OBS_DIM 一致
         self.reset()
 
     def reset(self):
@@ -102,18 +91,10 @@ class SnakeEnv:
             if self.food not in self.body:
                 break
 
-    def _cast_ray(self, direction, tail_included=True):
-        """沿 direction 发射射线，返回 (自由路径长度比, 食物信号)。
-
-        tail_included=True 时检测完整身体（吃到食物、尾巴不移动的场景）；
-        False 时排除即将移走的尾巴（与 step 的碰撞检测保持一致，
-        避免网络被"下一步就会让开的尾巴"误导）。
-        """
+    def _cast_ray(self, direction):
         max_dist = self.grid_size
         obstacle_dist = max_dist
         food_dist = -1
-
-        body_set = self.body if tail_included else self.body[:-1]
 
         for step in range(1, max_dist + 1):
             r = self.head[0] + direction[0] * step
@@ -122,7 +103,7 @@ class SnakeEnv:
             if r < 0 or r >= self.grid_size or c < 0 or c >= self.grid_size:
                 obstacle_dist = step
                 break
-            if (r, c) in body_set:
+            if (r, c) in self.body:
                 obstacle_dist = step
                 break
             if (r, c) == self.food and food_dist < 0:
@@ -135,19 +116,8 @@ class SnakeEnv:
             food_signal = 0.0
         return free_path_length, food_signal
 
-    def _get_obs(self, will_eat=False):
-        """构造 24 维观测。
-
-        布局（与 Config.OBS_DIM 对应）：
-        [0:3]    食物方向 bit（前 / 左前 / 右前）
-        [3]      食物距离（欧氏距离，归一化到 [0,1]）
-        [4:14]   5 条射线 × 2（自由路径比, 食物信号）
-        [14:22]  自体感知：以蛇头为原点、蛇头朝向为 0° 的 8 个方向桶，
-                 每桶 = 该方向最近身体节的"接近度"（1.0=紧贴蛇头，0=无身体）
-        [22:24]  蛇尾在蛇头局部坐标系下的相对坐标
-                 （x 轴=蛇头朝向，y 轴=左侧，除以网格大小归一化）
-        """
-        obs = np.zeros(self.obs_dim, dtype=np.float32)
+    def _get_obs(self):
+        obs = np.zeros(13, dtype=np.float32)
 
         left_dir = (-self.dir[1], self.dir[0])
         right_dir = (self.dir[1], -self.dir[0])
@@ -156,7 +126,6 @@ class SnakeEnv:
         if (dx * self.dir[0] + dy * self.dir[1]) > 0:       obs[0] = 1.0
         if (dx * left_dir[0] + dy * left_dir[1]) > 0:       obs[1] = 1.0
         if (dx * right_dir[0] + dy * right_dir[1]) > 0:     obs[2] = 1.0
-        obs[3] = min(math.hypot(dx, dy) / (self.grid_size * math.sqrt(2)), 1.0)
 
         ray_dirs = [
             left_dir,
@@ -165,38 +134,10 @@ class SnakeEnv:
             (self.dir[0] + right_dir[0], self.dir[1] + right_dir[1]),
             right_dir,
         ]
-        # 射线检测与 step 的碰撞逻辑保持一致：
-        # 当前这一步吃到食物（will_eat=True）时尾巴不移走、按完整身体检测；
-        # 否则排除即将移走的尾巴，避免网络被"马上会让开的尾巴"误导。
-        tail_included = will_eat
         for i, rd in enumerate(ray_dirs):
-            free_path, food_sig = self._cast_ray(rd, tail_included=tail_included)
-            obs[4 + i * 2]     = free_path
-            obs[4 + i * 2 + 1] = food_sig
-
-        # --- 自体感知：8 方向桶（蛇头朝向参考系，逆时针为正 = 左侧）---
-        dxh, dyh = self.dir  # 单位方向向量
-        max_self_dist = self.grid_size * math.sqrt(2)
-        for seg in self.body[1:]:  # 排除蛇头自身
-            wx = seg[0] - self.head[0]
-            wy = seg[1] - self.head[1]
-            # 旋转到蛇头朝向参考系：x=前方, y=左方
-            rot_x = wx * dxh + wy * dyh
-            rot_y = -wx * dyh + wy * dxh
-            ang = math.degrees(math.atan2(rot_y, rot_x))  # [-180, 180]
-            if ang < 0:
-                ang += 360.0
-            bucket = int((ang + 22.5) // 45) % 8
-            closeness = 1.0 - min(math.hypot(wx, wy) / max_self_dist, 1.0)
-            if closeness > obs[14 + bucket]:
-                obs[14 + bucket] = closeness
-
-        # --- 蛇尾局部坐标（追尾策略的关键线索）---
-        tail = self.body[-1]
-        wx = tail[0] - self.head[0]
-        wy = tail[1] - self.head[1]
-        obs[22] = (wx * dxh + wy * dyh) / self.grid_size
-        obs[23] = (-wx * dyh + wy * dxh) / self.grid_size
+            free_path, food_sig = self._cast_ray(rd)
+            obs[3 + i * 2]     = free_path
+            obs[3 + i * 2 + 1] = food_sig
 
         return obs
 
@@ -215,7 +156,7 @@ class SnakeEnv:
         if (next_head[0] < 0 or next_head[0] >= self.grid_size or
             next_head[1] < 0 or next_head[1] >= self.grid_size or
             next_head in body_to_check):
-            return self._get_obs(will_eat), False, True
+            return self._get_obs(), False, True
 
         self.body.insert(0, next_head)
         self.head = next_head
@@ -284,12 +225,6 @@ class EIBrainRegion(nn.Module):
         self.w_ie = cfg.W_IE
         self.baseline = None
 
-        # --- 缓存：掩码权重与归一化扩散矩阵（forward 中复用，避免每步重算） ---
-        self.register_buffer('W_rec_eff', torch.zeros(self.N, self.N))
-        self.register_buffer('W_out_eff', torch.zeros(self.action_dim, self.N))
-        self.register_buffer('M_norm', torch.zeros(self.N, self.N))
-        self.refresh_cached()
-
     def reset_runtime(self):
         """每局开始前重置激素、短期状态与连续动作计数"""
         self.hormone_excit.zero_()
@@ -298,9 +233,9 @@ class EIBrainRegion(nn.Module):
         self.consecutive_counts.zero_()
 
     def forward(self, obs_t, E_prev, I_prev):
-        # 1. 外部与循环输入（W_in 因生命周期学习每步变化，现算；W_rec 用缓存掩码权重）
+        # 1. 外部与循环输入
         ext_in = torch.matmul(self.W_in * self.M_in, obs_t)
-        rec_in = torch.matmul(self.W_rec_eff, E_prev)
+        rec_in = torch.matmul(self.W_rec * self.M_rec, E_prev)
         total_in = ext_in + rec_in
 
         # 2. 激素调控前馈网络
@@ -309,17 +244,21 @@ class EIBrainRegion(nn.Module):
         excit_cmd = torch.relu(torch.matmul(self.W_excit, h_hidden) + self.b_excit)
         inhib_cmd = torch.relu(torch.matmul(self.W_inhib, h_hidden) + self.b_inhib)
 
-        # 3. 激素沿拓扑扩散 + 长期衰减（M_norm 缓存，无需每步重算）
+        # 3. 激素沿拓扑扩散 + 长期衰减
+        with torch.no_grad():
+            deg = self.M_rec.sum(dim=1, keepdim=True) + 1e-8
+            M_norm = self.M_rec / deg
+
         self.hormone_excit = (1 - self.cfg.HORMONE_DECAY) * excit_cmd + \
             self.cfg.HORMONE_DECAY * (
                 (1 - self.cfg.EXCIT_DIFFUSION) * self.hormone_excit +
-                self.cfg.EXCIT_DIFFUSION * torch.matmul(self.M_norm, self.hormone_excit)
+                self.cfg.EXCIT_DIFFUSION * torch.matmul(M_norm, self.hormone_excit)
             )
 
         self.hormone_inhib = (1 - self.cfg.HORMONE_DECAY) * inhib_cmd + \
             self.cfg.HORMONE_DECAY * (
                 (1 - self.cfg.INHIB_DIFFUSION) * self.hormone_inhib +
-                self.cfg.INHIB_DIFFUSION * torch.matmul(self.M_norm, self.hormone_inhib)
+                self.cfg.INHIB_DIFFUSION * torch.matmul(M_norm, self.hormone_inhib)
             )
 
         # 4. 短期状态
@@ -341,8 +280,8 @@ class EIBrainRegion(nn.Module):
         pred_in = torch.matmul(self.W_pred, E_prev)
         error = total_in - pred_in
 
-        # 8. 动作输出 (添加偏置, W_out_eff 缓存)
-        action_logits = torch.matmul(self.W_out_eff, E_new) + self.b_out
+        # 8. 动作输出 (添加偏置)
+        action_logits = torch.matmul(self.W_out * self.M_out, E_new) + self.b_out
         
         # 9. 动作疲劳抑制 (纯基于连续次数)
         # fatigue = max(0, 连续次数 - 阈值) * 增益
@@ -355,103 +294,30 @@ class EIBrainRegion(nn.Module):
     def update_fatigue(self, action):
         """更新连续动作计数。一旦切换动作，其他动作计数清零。"""
         with torch.no_grad():
-            cur = float(self.consecutive_counts[action]) + 1.0
-            self.consecutive_counts.zero_()
-            self.consecutive_counts[action] = cur
+            mask = torch.ones(self.action_dim, dtype=torch.bool)
+            mask[action] = False
+            self.consecutive_counts[mask] = 0.0
+            self.consecutive_counts[action] += 1.0
 
     def apply_pc_update(self, E_prev, error, total_in, obs_t):
-        """局部预测编码微调（生命周期内学习，非原地更新以保证遗传基线安全）"""
+        """局部预测编码微调（生命周期内学习）"""
         with torch.no_grad():
             lr = self.cfg.PC_LR
             decay = self.cfg.PC_DECAY
-            self.W_pred.data = self.W_pred.data + \
-                lr * torch.outer(error, E_prev) - decay * self.W_pred.data
-            self.W_in.data = self.W_in.data + \
-                lr * torch.outer(error, obs_t) - decay * self.W_in.data
-
-    def refresh_cached(self):
-        """刷新前向缓存：W_rec*M_rec、W_out*M_out 与归一化扩散矩阵 M_norm。
-
-        条件：权重/掩码被整体（重新）赋值后调用。W_in 因生命周期学习
-        每步变化，不缓存、在 forward 中现算。
-        """
-        with torch.no_grad():
-            self.W_rec_eff.copy_(self.W_rec.data * self.M_rec)
-            self.W_out_eff.copy_(self.W_out.data * self.M_out)
-            deg = self.M_rec.sum(dim=1, keepdim=True) + 1e-8
-            self.M_norm.copy_(self.M_rec / deg)
+            self.W_pred += lr * torch.outer(error, E_prev) - decay * self.W_pred
+            self.W_in += lr * torch.outer(error, obs_t) - decay * self.W_in
 
     def save_genetic_baseline(self):
-        """保存遗传基线（零拷贝优化）。
-
-        - W_in / W_pred：生命周期学习（apply_pc_update）每步改动，需克隆快照
-        - M_in / M_rec / M_out：进化变异时原地翻转，需克隆快照
-        - 其余权重：评估/变异时均以“替换 data 引用”方式更新，直接存引用即可
-        """
         self.baseline = {
-            'W_in': self.W_in.data.clone(),
-            'W_rec': self.W_rec.data,
-            'W_out': self.W_out.data,
-            'W_pred': self.W_pred.data.clone(),
-            'b_out': self.b_out.data,
+            'W_in': self.W_in.data.clone(), 'W_rec': self.W_rec.data.clone(),
+            'W_out': self.W_out.data.clone(), 'W_pred': self.W_pred.data.clone(),
+            'b_out': self.b_out.data.clone(),
             'M_in': self.M_in.clone(), 'M_rec': self.M_rec.clone(), 'M_out': self.M_out.clone(),
-            'tau_e_init': self.tau_e_init.data,
-            'W_hormone1': self.W_hormone1.data, 'b_hormone1': self.b_hormone1.data,
-            'W_excit': self.W_excit.data, 'b_excit': self.b_excit.data,
-            'W_inhib': self.W_inhib.data, 'b_inhib': self.b_inhib.data,
+            'tau_e_init': self.tau_e_init.data.clone(),
+            'W_hormone1': self.W_hormone1.data.clone(), 'b_hormone1': self.b_hormone1.data.clone(),
+            'W_excit': self.W_excit.data.clone(), 'b_excit': self.b_excit.data.clone(),
+            'W_inhib': self.W_inhib.data.clone(), 'b_inhib': self.b_inhib.data.clone(),
         }
-
-    def clone(self):
-        """轻量克隆：只复制遗传基因（权重/掩码）与基线，远快于 copy.deepcopy。
-
-        运行时状态（激素、短期状态、疲劳计数）不复制，统一置零。
-        基线采用引用共享——其中所有可能被原地修改的张量
-        （W_in/W_pred/M_*）均为独立克隆，因此共享是安全的。
-        """
-        new = EIBrainRegion.__new__(EIBrainRegion)
-        nn.Module.__init__(new)
-
-        new.cfg = self.cfg
-        new.N = self.N
-        new.obs_dim = self.obs_dim
-        new.action_dim = self.action_dim
-
-        # 基因型掩码
-        new.M_in = self.M_in.clone()
-        new.M_rec = self.M_rec.clone()
-        new.M_out = self.M_out.clone()
-
-        # 表现型权重
-        new.W_in = nn.Parameter(self.W_in.data.clone())
-        new.W_rec = nn.Parameter(self.W_rec.data.clone())
-        new.W_out = nn.Parameter(self.W_out.data.clone())
-        new.W_pred = nn.Parameter(self.W_pred.data.clone())
-        new.b_out = nn.Parameter(self.b_out.data.clone())
-        new.tau_e_init = nn.Parameter(self.tau_e_init.data.clone())
-
-        # 激素调控网络
-        new.W_hormone1 = nn.Parameter(self.W_hormone1.data.clone())
-        new.b_hormone1 = nn.Parameter(self.b_hormone1.data.clone())
-        new.W_excit = nn.Parameter(self.W_excit.data.clone())
-        new.b_excit = nn.Parameter(self.b_excit.data.clone())
-        new.W_inhib = nn.Parameter(self.W_inhib.data.clone())
-        new.b_inhib = nn.Parameter(self.b_inhib.data.clone())
-
-        # 运行时状态（置零）
-        new.register_buffer('hormone_excit', torch.zeros(self.N))
-        new.register_buffer('hormone_inhib', torch.zeros(self.N))
-        new.register_buffer('short_term_state', torch.zeros(self.N))
-        new.register_buffer('consecutive_counts', torch.zeros(self.action_dim))
-        new.register_buffer('W_rec_eff', torch.zeros(self.N, self.N))
-        new.register_buffer('W_out_eff', torch.zeros(self.action_dim, self.N))
-        new.register_buffer('M_norm', torch.zeros(self.N, self.N))
-
-        new.w_ei = self.w_ei
-        new.w_ie = self.w_ie
-        new.baseline = self.baseline  # 引用共享（安全，见 docstring）
-
-        new.refresh_cached()
-        return new
 
     def restore_genetic_baseline(self):
         if self.baseline:
@@ -470,7 +336,6 @@ class EIBrainRegion(nn.Module):
             self.b_excit.data = self.baseline['b_excit'].clone()
             self.W_inhib.data = self.baseline['W_inhib'].clone()
             self.b_inhib.data = self.baseline['b_inhib'].clone()
-            self.refresh_cached()
 
 
 # ==========================================
@@ -483,12 +348,11 @@ def evaluate_individual(brain, env, render=False, max_steps=None):
 
     original_baseline = None
     if not render and brain.baseline:
-        # 引用基线（零拷贝）：评估期间只替换 data 引用、不原地修改基线张量，安全
-        original_baseline = brain.baseline
+        original_baseline = {k: v.clone() for k, v in brain.baseline.items()}
 
     total_foods = []
     total_steps_list = []
-    total_action_counts = [0, 0, 0]  # 统计5局总动作分布（Python list 更快）
+    total_action_counts = torch.zeros(cfg.ACTION_DIM) # 统计5局总动作分布
 
     for ep in range(cfg.EVAL_EPISODES):
         # 仅在第1局恢复出厂设置，后续局保留上一局学到的权重
@@ -499,16 +363,15 @@ def evaluate_individual(brain, env, render=False, max_steps=None):
         obs = env.reset()
         E = torch.zeros(brain.N)
         I = torch.zeros(brain.N)
-        obs_t = torch.empty(brain.obs_dim, dtype=torch.float32)  # 预分配复用
 
         ep_food = 0
         steps = 0
         done = False
 
         while not done and steps < max_steps:
-            obs_t.copy_(torch.from_numpy(obs))
+            obs_t = torch.tensor(obs, dtype=torch.float32)
             with torch.no_grad():
-                E_prev = E  # 引用旧张量（forward 不原地修改 E_prev）
+                E_old = E.clone()
                 logits, E, I, error, total_in = brain(obs_t, E, I)
                 action = torch.argmax(logits).item()
 
@@ -516,7 +379,7 @@ def evaluate_individual(brain, env, render=False, max_steps=None):
             total_action_counts[action] += 1
 
             if not render:
-                brain.apply_pc_update(E_prev, error, total_in, obs_t)
+                brain.apply_pc_update(E_old, error, total_in, obs_t)
 
             next_obs, ate_food, done = env.step(action)
             if ate_food:
@@ -558,13 +421,13 @@ def evolve_topology(population, metrics_list, cfg):
     )
 
     elite_idx = sorted_indices[:cfg.ELITE_SIZE]
-    elites = [population[i].clone() for i in elite_idx]
+    elites = [copy.deepcopy(population[i]) for i in elite_idx]
 
-    new_pop = [e.clone() for e in elites]
+    new_pop = [copy.deepcopy(e) for e in elites]
 
     while len(new_pop) < len(population):
         p1, p2 = random.sample(elites, 2)
-        child = p1.clone()
+        child = copy.deepcopy(p1)
         N = child.N
 
         col_mask = torch.rand(N) > 0.5
@@ -624,7 +487,6 @@ def evolve_topology(population, metrics_list, cfg):
                 mask = torch.rand_like(w) < cfg.HORMONE_MUT_FRAC
                 getattr(child, attr).data = w + noise * mask
 
-        child.refresh_cached()
         child.save_genetic_baseline()
         new_pop.append(child)
 
@@ -881,7 +743,7 @@ def plot_topology_layered(brain, cfg, partition):
         ax.scatter(x, y, s=48, color=tau_color, zorder=4)
         in_n = int(in_degree[col])
         if in_n > 0:
-            ax.scatter(x, y, s=4.0 + 2.0 * min(in_n, 20), color='white', zorder=5)
+            ax.scatter(x, y, s=4.0 + 2.0 * min(in_n, 2), color='white', zorder=5)
 
     # --- 输入 / 输出节点 ---
     for j in range(brain.obs_dim):
@@ -914,7 +776,7 @@ def plot_topology_layered(brain, cfg, partition):
 
     # --- 图例 / colorbar / 装饰 ---
     handles = [
-        Patch(facecolor='limegreen', edgecolor='black', label='Input node (24 obs)'),
+        Patch(facecolor='limegreen', edgecolor='black', label='Input node (13 obs)'),
         Patch(facecolor='orange', edgecolor='black', label='Output node (3 actions)'),
         Patch(facecolor='white', edgecolor='black', label='Column node (ring=community, fill=tau_e, dot=in-degree)'),
         Line2D([0], [0], color='green', lw=2, label='Input→Column edge'),
@@ -1132,372 +994,55 @@ def visualize_brain_ecosystem(brain, env, cfg):
 
 
 # ==========================================
-# 4c. 检查点 / 断点续训 / 最优模型
-# ==========================================
-def _config_dict(cfg):
-    """收集生效的配置为可序列化 dict（实例属性优先于类属性）。
-
-    Config 采用纯类属性设计，正常情况下 vars(cfg) 为空 dict；
-    但用户也可能通过「cfg.KEY = value」在实例上覆盖超参。
-    这里用 {类属性, 实例属性} 合并，实例属性覆盖同名类属性，
-    确保序列化与断点校验反映的是真正生效的配置。
-    """
-    merged = {}
-    merged.update(vars(cfg.__class__))
-    merged.update(vars(cfg))
-    return {k: v for k, v in merged.items() if not k.startswith('__')}
-
-
-def save_brain_state(brain, use_half=True):
-    """将单个个体的遗传属性打包为可序列化 dict。
-
-    - 掩码 M_* 转为 uint8（体积 1/4）
-    - 权重类参数转为 float16（体积减半）—— 进化噪声量级远大于 fp16
-      精度误差，安全可靠；最优模型单独用 fp32 全精度保存。
-    """
-    dtype = torch.float16 if use_half else torch.float32
-    with torch.no_grad():
-        return {
-            'N': brain.N,
-            'M_in': brain.M_in.to(torch.uint8),
-            'M_rec': brain.M_rec.to(torch.uint8),
-            'M_out': brain.M_out.to(torch.uint8),
-            'W_in': brain.W_in.data.to(dtype),
-            'W_rec': brain.W_rec.data.to(dtype),
-            'W_out': brain.W_out.data.to(dtype),
-            'W_pred': brain.W_pred.data.to(dtype),
-            'b_out': brain.b_out.data.to(dtype),
-            'tau_e_init': brain.tau_e_init.data.to(dtype),
-            'W_hormone1': brain.W_hormone1.data.to(dtype),
-            'b_hormone1': brain.b_hormone1.data.to(dtype),
-            'W_excit': brain.W_excit.data.to(dtype),
-            'b_excit': brain.b_excit.data.to(dtype),
-            'W_inhib': brain.W_inhib.data.to(dtype),
-            'b_inhib': brain.b_inhib.data.to(dtype),
-        }
-
-
-def load_brain_state(state, cfg):
-    """从 save_brain_state 的 dict 重建 EIBrainRegion 个体。
-
-    采用与 clone() 一致的 __new__ + nn.Module.__init__ 手动重建模式，
-    并重建缓存（refresh_cached）与遗传基线（save_genetic_baseline）。
-    """
-    new = EIBrainRegion.__new__(EIBrainRegion)
-    nn.Module.__init__(new)
-
-    new.cfg = cfg
-    new.N = int(state['N'])
-    new.obs_dim = cfg.OBS_DIM
-    new.action_dim = cfg.ACTION_DIM
-
-    # 基因型掩码（uint8 -> float32）
-    new.M_in = state['M_in'].float()
-    new.M_rec = state['M_rec'].float()
-    new.M_out = state['M_out'].float()
-
-    # 表现型权重（fp16 -> fp32）
-    new.W_in = nn.Parameter(state['W_in'].float())
-    new.W_rec = nn.Parameter(state['W_rec'].float())
-    new.W_out = nn.Parameter(state['W_out'].float())
-    new.W_pred = nn.Parameter(state['W_pred'].float())
-    new.b_out = nn.Parameter(state['b_out'].float())
-    new.tau_e_init = nn.Parameter(state['tau_e_init'].float())
-
-    # 激素调控网络
-    new.W_hormone1 = nn.Parameter(state['W_hormone1'].float())
-    new.b_hormone1 = nn.Parameter(state['b_hormone1'].float())
-    new.W_excit = nn.Parameter(state['W_excit'].float())
-    new.b_excit = nn.Parameter(state['b_excit'].float())
-    new.W_inhib = nn.Parameter(state['W_inhib'].float())
-    new.b_inhib = nn.Parameter(state['b_inhib'].float())
-
-    # 运行时状态（置零，与 clone() 一致）
-    new.register_buffer('hormone_excit', torch.zeros(new.N))
-    new.register_buffer('hormone_inhib', torch.zeros(new.N))
-    new.register_buffer('short_term_state', torch.zeros(new.N))
-    new.register_buffer('consecutive_counts', torch.zeros(new.action_dim))
-    new.register_buffer('W_rec_eff', torch.zeros(new.N, new.N))
-    new.register_buffer('W_out_eff', torch.zeros(new.action_dim, new.N))
-    new.register_buffer('M_norm', torch.zeros(new.N, new.N))
-
-    new.w_ei = cfg.W_EI
-    new.w_ie = cfg.W_IE
-    new.baseline = None
-
-    new.refresh_cached()
-    new.save_genetic_baseline()
-    return new
-
-
-def save_checkpoint(path, cfg, next_gen, population, history,
-                    cum_eval_time=0.0, cum_evolve_time=0.0,
-                    best_brain=None, best_food=-1.0, best_steps=0.0):
-    """保存训练断点：先写 .tmp 临时文件，再原子替换正式文件。
-
-    原子替换会自动删除上一次自动保存的断点节点，
-    磁盘上始终只保留 1 个断点，保证空间足够。
-    """
-    parent = os.path.dirname(os.path.abspath(path))
-    os.makedirs(parent, exist_ok=True)
-
-    payload = {
-        'next_gen': next_gen,
-        'population': [save_brain_state(ind) for ind in population],
-        'history': history,
-        'cum_eval_time': float(cum_eval_time),
-        'cum_evolve_time': float(cum_evolve_time),
-        'best_brain': save_brain_state(best_brain) if best_brain is not None else None,
-        'best_food': float(best_food),
-        'best_steps': float(best_steps),
-        'config': _config_dict(cfg),
-        'random_state': random.getstate(),
-        'torch_rng_state': torch.get_rng_state(),
-        'saved_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-    }
-
-    tmp_path = path + '.tmp'
-    torch.save(payload, tmp_path)
-    os.replace(tmp_path, path)   # 原子替换：删除旧节点、写入新节点
-    print(f"  [Checkpoint] 断点已保存 -> {path} "
-          f"(next_gen={next_gen}, saved_at={payload['saved_at']})")
-
-
-def load_checkpoint(path, cfg):
-    """读取断点；文件不存在或配置不兼容时返回 None。"""
-    if not os.path.exists(path):
-        return None
-
-    data = torch.load(path, map_location='cpu',weights_only=False)
-    saved_cfg = data.get('config', {})
-
-    # 脑区规模不匹配的断点不能复用于当前代码
-    if saved_cfg:
-        if (saved_cfg.get('NUM_COLUMNS') != cfg.NUM_COLUMNS or
-                saved_cfg.get('OBS_DIM') != cfg.OBS_DIM or
-                saved_cfg.get('ACTION_DIM') != cfg.ACTION_DIM):
-            print(f"警告: 断点 {path} 与当前配置不匹配 (N/OBS/ACTION_DIM)，已忽略")
-            return None
-
-    population = [load_brain_state(s, cfg) for s in data['population']]
-    best_brain = (load_brain_state(data['best_brain'], cfg)
-                  if data.get('best_brain') is not None else None)
-
-    # 恢复随机数状态，保证接续后的进化序列与中断前一致
-    random.setstate(data['random_state'])
-    torch.set_rng_state(data['torch_rng_state'])
-
-    return {
-        'next_gen': int(data['next_gen']),
-        'population': population,
-        'history': data['history'],
-        'cum_eval_time': float(data.get('cum_eval_time', 0.0)),
-        'cum_evolve_time': float(data.get('cum_evolve_time', 0.0)),
-        'best_brain': best_brain,
-        'best_food': float(data.get('best_food', -1.0)),
-        'best_steps': float(data.get('best_steps', 0.0)),
-    }
-
-
-def save_best_model(path, brain, cfg, food, steps):
-    """训练完成时保存最优个体（fp32 全精度，体积小，便于直接加载复用）。"""
-    parent = os.path.dirname(os.path.abspath(path))
-    os.makedirs(parent, exist_ok=True)
-
-    torch.save({
-        'brain': save_brain_state(brain, use_half=False),
-        'food': float(food),
-        'steps': float(steps),
-        'config': _config_dict(cfg),
-        'saved_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-    }, path)
-
-
-def load_best_model_brain(path, cfg):
-    """从 save_best_model 保存的最优模型文件中恢复个体与其指标。
-
-    返回 (brain, food, steps) 元组；文件不存在 / 读取失败 /
-    配置规模不匹配（N/OBS/ACTION_DIM）时返回 None，保证种子可安全注入。
-    """
-    if not os.path.exists(path):
-        return None
-
-    try:
-        data = torch.load(path, map_location='cpu',weights_only=False)
-    except Exception as e:
-        print(f"警告: 最优模型 {path} 读取失败 ({e})，已忽略种子")
-        return None
-
-    saved_cfg = data.get('config', {})
-    if saved_cfg:
-        if (saved_cfg.get('NUM_COLUMNS') != cfg.NUM_COLUMNS or
-                saved_cfg.get('OBS_DIM') != cfg.OBS_DIM or
-                saved_cfg.get('ACTION_DIM') != cfg.ACTION_DIM):
-            print(f"警告: 最优模型 {path} 与当前配置不匹配 (N/OBS/ACTION_DIM)，已忽略种子")
-            return None
-
-    brain = load_brain_state(data['brain'], cfg)
-    return brain, float(data.get('food', -1.0)), float(data.get('steps', 0.0))
-
-
-# ==========================================
-# 5. 主循环（断点续训 + 每 N 代自动保存 + 完成保存最优模型）
+# 5. 主循环
 # ==========================================
 if __name__ == "__main__":
     cfg = Config()
     env = SnakeEnv(grid_size=cfg.GRID_SIZE)
 
-    t_program = time.perf_counter()
+    print("Initializing Population...")
+    print(f"  Observation: 5 rays x 2 + 3 food direction = {cfg.OBS_DIM} dim")
+    print(f"  Action fatigue: gain={cfg.FATIGUE_GAIN}, threshold={cfg.FATIGUE_THRESHOLD}, max={cfg.FATIGUE_MAX}")
+    population = [EIBrainRegion(cfg) for _ in range(cfg.POP_SIZE)]
+    for ind in population:
+        ind.save_genetic_baseline()
 
-    # ---- 断点自动接续 ----
-    start_gen = 0
-    population = None
     history = {'gen': [], 'best_food': [], 'avg_food': [], 'best_steps': []}
-    cum_eval_time = 0.0
-    cum_evolve_time = 0.0
-    best_ever_brain = None
-    best_ever_food = -1.0
-    best_ever_steps = 0.0
 
-    if cfg.AUTO_RESUME and os.path.exists(cfg.CHECKPOINT_PATH):
-        ckpt = load_checkpoint(cfg.CHECKPOINT_PATH, cfg)
-        if ckpt is not None:
-            start_gen = ckpt['next_gen']
-            population = ckpt['population']
-            history = ckpt['history']
-            cum_eval_time = ckpt['cum_eval_time']
-            cum_evolve_time = ckpt['cum_evolve_time']
-            best_ever_brain = ckpt['best_brain']
-            best_ever_food = ckpt['best_food']
-            best_ever_steps = ckpt['best_steps']
-            last_done = history['gen'][-1] + 1 if history['gen'] else 0
-            print(f"\n=== 检测到断点 [{cfg.CHECKPOINT_PATH}] ===")
-            print(f"  {cfg.GENERATIONS} 代中已完成 {last_done} 代 -> 从第 {start_gen} 代接续 | "
-                  f"历史最优: Food={best_ever_food:.1f}, Steps={best_ever_steps:.1f} | "
-                  f"已耗时: {cum_eval_time + cum_evolve_time:.1f}s")
+    for gen in range(cfg.GENERATIONS):
+        metrics = []
+        for ind in population:
+            m = evaluate_individual(ind, env)
+            metrics.append(m)
 
-    if population is None:
-        try:
-            t_init_start = time.perf_counter()
-            print("Initializing Population...")
-            print(f"  Observation: 3 food dir + 1 food dist + 5 rays x 2 + 8 self-bins + 2 tail = {cfg.OBS_DIM} dim")
-            print(f"  Action fatigue: gain={cfg.FATIGUE_GAIN}, threshold={cfg.FATIGUE_THRESHOLD}, max={cfg.FATIGUE_MAX}")
-            population = [EIBrainRegion(cfg) for _ in range(cfg.POP_SIZE)]
-            for ind in population:
-                ind.save_genetic_baseline()
+        best_idx = max(range(len(metrics)),
+                       key=lambda i: (metrics[i][0], -metrics[i][1]))
+        best_food = metrics[best_idx][0]
+        best_steps = metrics[best_idx][1]
+        avg_food = np.mean([m[0] for m in metrics])
 
-            # ---- 种子继承（方案 1）：以已有最优模型作为种群的精英个体 ----
-            if cfg.SEED_FROM_BEST:
-                seed_result = load_best_model_brain(cfg.BEST_MODEL_PATH, cfg)
-                if seed_result is not None:
-                    seed, seed_food, seed_steps = seed_result
-                    # 替换种群首位为最优模型种子（其余仍为随机个体）
-                    population[0] = seed
-                    # 同步历史最优跟踪起点：种子个体记录其上轮指标，
-                    # 后续只有严格更优的个体才会覆盖它
-                    best_ever_brain = seed
-                    best_ever_food = seed_food
-                    best_ever_steps = seed_steps
-                    print(f"  [Seed] 已注入上一轮最优模型 {cfg.BEST_MODEL_PATH} "
-                          f"作为种群种子（上轮 Food={seed_food:.1f}, Steps={seed_steps:.1f}；"
-                          f"其余 {cfg.POP_SIZE - 1} 个体随机初始化）")
-                else:
-                    print(f"  [Seed] 未发现可用的最优模型种子，全新随机初始化")
+        history['gen'].append(gen)
+        history['best_food'].append(best_food)
+        history['avg_food'].append(avg_food)
+        history['best_steps'].append(best_steps)
 
-            print(f"  Population init done in {time.perf_counter() - t_init_start:.1f}s")
-        except KeyboardInterrupt:
-            print("\n种群初始化期间被中断（此时尚无断点可续，下次运行将重新初始化）")
-            sys.exit(0)
+        best_brain = population[best_idx]
+        print(f"Gen {gen+1}/{cfg.GENERATIONS} | "
+              f"BestFood: {best_food:.1f} | BestSteps: {best_steps:.1f} | AvgFood: {avg_food:.1f} | "
+              f"Edges: {best_brain.M_in.sum().item():.0f}-in / "
+              f"{best_brain.M_rec.sum().item():.0f}-rec / "
+              f"{best_brain.M_out.sum().item():.0f}-out | "
+              f"tau_e: [{best_brain.tau_e_init.min().item():.3f}, "
+              f"{best_brain.tau_e_init.max().item():.3f}]")
 
-        # 初始断点：保证刚启动即被中断也不丢失种群
-        save_checkpoint(cfg.CHECKPOINT_PATH, cfg, start_gen, population, history,
-                        cum_eval_time, cum_evolve_time,
-                        best_ever_brain, best_ever_food, best_ever_steps)
-
-    # ---- 进化主循环 ----
-    cur_gen = None
-    try:
-        for gen in range(start_gen, cfg.GENERATIONS):
-            cur_gen = gen
-            metrics = []
-            t_gen_start = time.perf_counter()
-            for ind in population:
-                m = evaluate_individual(ind, env)
-                metrics.append(m)
-            eval_time = time.perf_counter() - t_gen_start
-            cum_eval_time += eval_time
-
-            best_idx = max(range(len(metrics)),
-                           key=lambda i: (metrics[i][0], -metrics[i][1]))
-            best_food = metrics[best_idx][0]
-            best_steps = metrics[best_idx][1]
-            avg_food = np.mean([m[0] for m in metrics])
-
-            history['gen'].append(gen)
-            history['best_food'].append(best_food)
-            history['avg_food'].append(avg_food)
-            history['best_steps'].append(best_steps)
-
-            best_brain = population[best_idx]
-
-            # 跨代跟踪历史最优个体（不受 evolve_topology 替换影响）
-            if (best_food > best_ever_food or
-                    (best_food == best_ever_food and best_steps < best_ever_steps)):
-                best_ever_food = best_food
-                best_ever_steps = best_steps
-                best_ever_brain = best_brain.clone()
-
-            if gen < cfg.GENERATIONS - 1:
-                t_ev_start = time.perf_counter()
-                population = evolve_topology(population, metrics, cfg)
-                evolve_time = time.perf_counter() - t_ev_start
-                cum_evolve_time += evolve_time
-            else:
-                evolve_time = 0.0
-
-            print(f"Gen {gen+1}/{cfg.GENERATIONS} | "
-                  f"BestFood: {best_food:.1f} | BestSteps: {best_steps:.1f} | AvgFood: {avg_food:.1f} | "
-                  f"Edges: {best_brain.M_in.sum().item():.0f}-in / "
-                  f"{best_brain.M_rec.sum().item():.0f}-rec / "
-                  f"{best_brain.M_out.sum().item():.0f}-out | "
-                  f"tau_e: [{best_brain.tau_e_init.min().item():.3f}, "
-                  f"{best_brain.tau_e_init.max().item():.3f}] | "
-                  f"eval {eval_time:.1f}s / evolve {evolve_time:.1f}s")
-
-            # 每 CHECKPOINT_INTERVAL 代自动保存一次（自动删除上一次节点）
-            if (gen + 1) % cfg.CHECKPOINT_INTERVAL == 0:
-                save_checkpoint(cfg.CHECKPOINT_PATH, cfg, gen + 1, population,
-                                history, cum_eval_time, cum_evolve_time,
-                                best_ever_brain, best_ever_food, best_ever_steps)
-
-    except KeyboardInterrupt:
-        nxt = cur_gen if cur_gen is not None else start_gen
-        print("\n训练被中断 (Ctrl+C)，正在保存断点以供下次自动接续...")
-        save_checkpoint(cfg.CHECKPOINT_PATH, cfg, nxt, population,
-                        history, cum_eval_time, cum_evolve_time,
-                        best_ever_brain, best_ever_food, best_ever_steps)
-        print(f"断点已保存: {cfg.CHECKPOINT_PATH} (下次运行将从第 {nxt} 代接续)")
-        sys.exit(0)
-
-    print(f"\nTotal runtime: {time.perf_counter() - t_program:.1f}s "
-          f"(eval {cum_eval_time:.1f}s / evolve {cum_evolve_time:.1f}s)")
-
-    # ---- 训练完成：保存最优模型 ----
-    if best_ever_brain is None:
-        best_ever_brain = population[0]
-    save_best_model(cfg.BEST_MODEL_PATH, best_ever_brain, cfg,
-                    best_ever_food, best_ever_steps)
-    print(f"\n最优模型已保存: {cfg.BEST_MODEL_PATH} "
-          f"(Food={best_ever_food:.1f}, Steps={best_ever_steps:.1f})")
-
-    # 训练已全部完成，删除临时断点释放空间
-    if os.path.exists(cfg.CHECKPOINT_PATH):
-        os.remove(cfg.CHECKPOINT_PATH)
-        print(f"训练已完成，已删除临时断点: {cfg.CHECKPOINT_PATH}")
+        if gen < cfg.GENERATIONS - 1:
+            population = evolve_topology(population, metrics, cfg)
 
     plot_history(history)
 
-    best_brain = best_ever_brain
+    best_idx = max(range(len(metrics)),
+                   key=lambda i: (metrics[i][0], -metrics[i][1]))
+    best_brain = population[best_idx]
 
     print("\n--- Best Brain Summary ---")
     print(f"Input connections active:   {best_brain.M_in.sum().item():.0f}/{best_brain.N * best_brain.obs_dim}")
