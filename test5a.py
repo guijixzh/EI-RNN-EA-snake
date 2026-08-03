@@ -17,7 +17,7 @@ import matplotlib.colors as mcolors
 class Config:
     # --- 进化参数 ---
     POP_SIZE = 2048
-    GENERATIONS = 100
+    GENERATIONS = 200
     ELITE_SIZE = 256
     MUT_RATE = 0.05
     TOPOLOGY_MUT_PROB = 0.05
@@ -85,14 +85,34 @@ class Config:
     SCREEN_MULTIPLIER = 3      # 精评覆盖倍数：K = ELITE_SIZE × SCREEN_MULTIPLIER
     SCREEN_AUTO_FALLBACK = True  # 初筛种群整体过弱时自动回退全量评估
 
-    # --- 检查点 / 断点续训 / 最优模型 / 种子继承（test5_fast 专属路径）---
-    CHECKPOINT_PATH = 'test5_fast_checkpoint.pth'  # 本代码专属断点文件
-    BEST_MODEL_PATH = 'test5_fast_best_model.pth'  # 本代码专属最优模型文件
-    CHECKPOINT_FALLBACK = 'test5_checkpoint.pth'   # 旧版 test5.py 断点（自动迁移接续来源）
-    BEST_MODEL_FALLBACK = 'test5_best_model.pth'   # 旧版最优模型（种子继承后备来源）
+    # --- 检查点 / 断点续训 / 最优模型 / 种子继承（test5a 专属路径）---
+    CHECKPOINT_PATH = 'test5a_checkpoint.pth'   # 本代码专属断点文件
+    BEST_MODEL_PATH = 'test5a_best_model.pth'   # 本代码专属最优模型文件
+    CHECKPOINT_FALLBACK = None                  # test5a 独立训练：不迁移其他脚本的断点
+    BEST_MODEL_FALLBACK = None                  # test5a 独立训练：不借用其他脚本的最优模型作种子
     AUTO_RESUME = True                          # 启动时自动检测并接续断点
     CHECKPOINT_INTERVAL = 5                     # 每 N 代自动保存一次（覆盖旧节点）
     SEED_FROM_BEST = True                       # 全新训练时允许以上一轮最优模型为种群种子
+
+    # --- B 方案：交替冻结进化（test5a 新增）---
+    # 个体参数按功能耦合拆为三组，按代轮换激活；被冻结的组
+    # 不交叉、不变异，原样继承父代 p1（避免交叉制造失配嵌合体）：
+    #   G1 结构组：拓扑掩码 M_* + 突触权重 W_*/b_out（表现型与基因型强耦合）
+    #   G2 动力学组：tau_e_init + w_ei + w_ie（共同决定 E-I 动力学平衡）
+    #   G3 激素组：W_hormone1/b_hormone1/W_excit/b_excit/W_inhib/b_inhib
+    # FREEZE_SCHEME：
+    #   'all'   = 每代全部激活（等价于原 test5_fast 的始终全量变异）
+    #   'hard'  = 严格按 gen%3 轮换，每组恰每隔两代激活一次
+    #   'soft'  = 按 G1/G2/G3_INTERVAL 取模独立激活（备选）
+    #   'cycle' = 固定周期顺序微调（默认）：恰好保证 G1 独占激活、
+    #             永远不与 G2/G3 同代（消除 G1 结构改组破坏 G2 动力学平衡的对冲）
+    FREEZE_SCHEME = 'cycle'
+    CYCLE_PATTERN = [('G2',), ('G1',), ('G2', 'G3'), ('G1',), ('G3',)]
+    # gen%5:    0   1    2      3    4
+    # 激活:    G2   G1   G2+G3   G1   G3
+    G1_INTERVAL = 3      # soft 备选：G1 结构组激活周期（每 N 代动一次）
+    G2_INTERVAL = 1      # soft 备选：G2 动力学组激活周期（每代都动，高频微调）
+    G3_INTERVAL = 5      # soft 备选：G3 激素组激活周期（低频稳定）
 
 
 # ==========================================
@@ -585,7 +605,54 @@ def evaluate_individual(brain, env, render=False, max_steps=None, episodes=None)
     return avg_food, avg_steps
 
 
-def evolve_topology(population, metrics_list, cfg):
+def _freeze_active_groups(gen, cfg):
+    """按 FREEZE_SCHEME 计算第 gen 代激活的参数组集合。
+
+    返回 frozenset({'G1', 'G2', 'G3'}) 的子集：
+    - 'all'   ：三组全部激活（等价于原 test5_fast 的始终全量变异）；
+    - 'hard'  ：严格按 gen%3 轮换（0→G1, 1→G2, 2→G3）；
+    - 'soft'  ：按 G1/G2/G3_INTERVAL 取模独立激活（备选）；
+    - 'cycle' ：固定周期顺序微调（默认）。CYCLE_PATTERN 定义 gen%len 的激活组合，
+                默认序列 G2 / G1 / G2+G3 / G1 / G3 保证 G1 独占激活，
+                永不与 G2/G3 同代，消除结构改组与动力学微调的对冲。
+    """
+    scheme = getattr(cfg, 'FREEZE_SCHEME', 'all')
+    if scheme == 'all':
+        return frozenset({'G1', 'G2', 'G3'})
+    if scheme == 'hard':
+        return frozenset({('G1', 'G2', 'G3')[gen % 3]})
+    if scheme == 'cycle':
+        pattern = getattr(cfg, 'CYCLE_PATTERN', [('G1', 'G2', 'G3')])
+        return frozenset(pattern[gen % len(pattern)])
+    # soft：各周期取模独立激活，互不干扰
+    active = set()
+    if gen % max(1, int(getattr(cfg, 'G1_INTERVAL', 3))) == 0:
+        active.add('G1')
+    if gen % max(1, int(getattr(cfg, 'G2_INTERVAL', 1))) == 0:
+        active.add('G2')
+    if gen % max(1, int(getattr(cfg, 'G3_INTERVAL', 5))) == 0:
+        active.add('G3')
+    return frozenset(active)
+
+
+def evolve_topology(population, metrics_list, cfg, gen=0):
+    """进化下一代（B 方案：软冻结交替优化三组参数）。
+
+    - G1 结构组（M_*/W_*/b_out）：低频搜索——拓扑与突触权重强耦合，必须一起动；
+      b_out 归入 G1（与 W_out 同属输出通路，一起交叉/变异避免失配）。
+    - G2 动力学组（tau_e_init/w_ei/w_ie）：高频微调——共同决定 E-I 动力学平衡。
+    - G3 激素组（W_hormone1/b_hormone1/W_excit/b_excit/W_inhib/b_inhib）：
+      低频稳定——独立调控回路。
+
+    被冻结的组不交叉、不变异，原样继承父代 p1
+    （child 克隆自 p1，跳过交叉与变异即天然冻结），
+    避免交叉制造"权重来自父代1、tau_e 来自父代2"的失配嵌合体。
+    """
+    active = _freeze_active_groups(gen, cfg)
+    has_g1 = 'G1' in active
+    has_g2 = 'G2' in active
+    has_g3 = 'G3' in active
+
     sorted_indices = sorted(
         range(len(metrics_list)),
         key=lambda i: (metrics_list[i][0], -metrics_list[i][1]),
@@ -602,74 +669,89 @@ def evolve_topology(population, metrics_list, cfg):
         child = p1.clone()
         N = child.N
 
-        col_mask = torch.rand(N) > 0.5
-        row_mask = col_mask.unsqueeze(1)
-        col_mask_2d = col_mask.unsqueeze(0)
-        same_p1 = row_mask & col_mask_2d
-        same_p2 = (~row_mask) & (~col_mask_2d)
-
         with torch.no_grad():
-            child.W_in.data = torch.where(col_mask.unsqueeze(1), p1.W_in.data, p2.W_in.data)
-            child.M_in = torch.where(col_mask.unsqueeze(1), p1.M_in, p2.M_in)
+            # ---- G1 交叉：结构组（掩码 + 权重 + 输出偏置）----
+            if has_g1:
+                col_mask = torch.rand(N) > 0.5
+                row_mask = col_mask.unsqueeze(1)
+                col_mask_2d = col_mask.unsqueeze(0)
+                same_p1 = row_mask & col_mask_2d
+                same_p2 = (~row_mask) & (~col_mask_2d)
 
-            child.W_rec.data = torch.where(same_p1, p1.W_rec.data,
-                                  torch.where(same_p2, p2.W_rec.data,
-                                      torch.where(torch.rand_like(p1.W_rec.data) > 0.5,
-                                                  p1.W_rec.data, p2.W_rec.data)))
-            child.M_rec = torch.where(same_p1, p1.M_rec,
-                             torch.where(same_p2, p2.M_rec,
-                                 torch.where(torch.rand_like(p1.M_rec) > 0.5,
-                                             p1.M_rec, p2.M_rec)))
+                child.W_in.data = torch.where(col_mask.unsqueeze(1), p1.W_in.data, p2.W_in.data)
+                child.M_in = torch.where(col_mask.unsqueeze(1), p1.M_in, p2.M_in)
 
-            child.W_out.data = torch.where(col_mask.unsqueeze(0), p1.W_out.data, p2.W_out.data)
-            child.M_out = torch.where(col_mask.unsqueeze(0), p1.M_out, p2.M_out)
+                child.W_rec.data = torch.where(same_p1, p1.W_rec.data,
+                                      torch.where(same_p2, p2.W_rec.data,
+                                          torch.where(torch.rand_like(p1.W_rec.data) > 0.5,
+                                                      p1.W_rec.data, p2.W_rec.data)))
+                child.M_rec = torch.where(same_p1, p1.M_rec,
+                                 torch.where(same_p2, p2.M_rec,
+                                     torch.where(torch.rand_like(p1.M_rec) > 0.5,
+                                                 p1.M_rec, p2.M_rec)))
 
-            child.tau_e_init.data = torch.where(col_mask, p1.tau_e_init.data, p2.tau_e_init.data)
-            child.w_ei.data = torch.where(col_mask, p1.w_ei.data, p2.w_ei.data)
-            child.w_ie.data = torch.where(col_mask, p1.w_ie.data, p2.w_ie.data)
+                child.W_out.data = torch.where(col_mask.unsqueeze(0), p1.W_out.data, p2.W_out.data)
+                child.M_out = torch.where(col_mask.unsqueeze(0), p1.M_out, p2.M_out)
 
-            for attr in ['W_hormone1', 'b_hormone1', 'W_excit', 'b_excit', 'W_inhib', 'b_inhib', 'b_out']:
-                p1_t = getattr(p1, attr).data
-                p2_t = getattr(p2, attr).data
-                mask = torch.rand_like(p1_t) > 0.5
-                getattr(child, attr).data = torch.where(mask, p1_t, p2_t)
+                # 输出偏置归 G1：与 W_out 同步混合
+                mask_out = torch.rand_like(p1.b_out.data) > 0.5
+                child.b_out.data = torch.where(mask_out, p1.b_out.data, p2.b_out.data)
 
+            # ---- G2 交叉：动力学组（tau_e / Wei / Wie）----
+            if has_g2:
+                col_mask2 = torch.rand(N) > 0.5
+                child.tau_e_init.data = torch.where(col_mask2, p1.tau_e_init.data, p2.tau_e_init.data)
+                child.w_ei.data = torch.where(col_mask2, p1.w_ei.data, p2.w_ei.data)
+                child.w_ie.data = torch.where(col_mask2, p1.w_ie.data, p2.w_ie.data)
+
+            # ---- G3 交叉：激素调控网络 ----
+            if has_g3:
+                for attr in ['W_hormone1', 'b_hormone1', 'W_excit', 'b_excit', 'W_inhib', 'b_inhib']:
+                    p1_t = getattr(p1, attr).data
+                    p2_t = getattr(p2, attr).data
+                    mask = torch.rand_like(p1_t) > 0.5
+                    getattr(child, attr).data = torch.where(mask, p1_t, p2_t)
+
+        # ---- 变异（逐组独立触发，冻结组一律跳过）----
         with torch.no_grad():
-            if random.random() < cfg.TOPOLOGY_MUT_PROB:
-                m_attr = random.choice(['M_in', 'M_rec', 'M_out'])
-                m_tensor = getattr(child, m_attr)
-                mut_mask = torch.rand_like(m_tensor) < cfg.MUT_RATE
-                m_tensor[mut_mask] = 1.0 - m_tensor[mut_mask]
+            if has_g1:
+                if random.random() < cfg.TOPOLOGY_MUT_PROB:
+                    m_attr = random.choice(['M_in', 'M_rec', 'M_out'])
+                    m_tensor = getattr(child, m_attr)
+                    mut_mask = torch.rand_like(m_tensor) < cfg.MUT_RATE
+                    m_tensor[mut_mask] = 1.0 - m_tensor[mut_mask]
 
-            for attr in ['W_in', 'W_rec', 'W_out', 'b_out']:
-                w_tensor = getattr(child, attr).data
-                noise = torch.randn_like(w_tensor) * cfg.WEIGHT_MUT_STD
-                noise_mask = torch.rand_like(w_tensor) < cfg.WEIGHT_MUT_FRAC
-                setattr(child, attr, nn.Parameter(w_tensor + noise * noise_mask))
+                for attr in ['W_in', 'W_rec', 'W_out', 'b_out']:
+                    w_tensor = getattr(child, attr).data
+                    noise = torch.randn_like(w_tensor) * cfg.WEIGHT_MUT_STD
+                    noise_mask = torch.rand_like(w_tensor) < cfg.WEIGHT_MUT_FRAC
+                    setattr(child, attr, nn.Parameter(w_tensor + noise * noise_mask))
 
-            tau_noise = torch.randn_like(child.tau_e_init.data) * cfg.TAU_E_MUT_STD
-            child.tau_e_init.data = torch.clamp(
-                child.tau_e_init.data + tau_noise,
-                cfg.TAU_E_MIN, cfg.TAU_E_MAX
-            )
+            if has_g2:
+                tau_noise = torch.randn_like(child.tau_e_init.data) * cfg.TAU_E_MUT_STD
+                child.tau_e_init.data = torch.clamp(
+                    child.tau_e_init.data + tau_noise,
+                    cfg.TAU_E_MIN, cfg.TAU_E_MAX
+                )
 
-            # Wei / Wie 逐柱体高斯变异（带边界 clamp）
-            w_ei_noise = torch.randn_like(child.w_ei.data) * cfg.W_EI_MUT_STD
-            child.w_ei.data = torch.clamp(
-                child.w_ei.data + w_ei_noise,
-                cfg.W_EI_MIN, cfg.W_EI_MAX
-            )
-            w_ie_noise = torch.randn_like(child.w_ie.data) * cfg.W_IE_MUT_STD
-            child.w_ie.data = torch.clamp(
-                child.w_ie.data + w_ie_noise,
-                cfg.W_IE_MIN, cfg.W_IE_MAX
-            )
+                # Wei / Wie 逐柱体高斯变异（带边界 clamp）
+                w_ei_noise = torch.randn_like(child.w_ei.data) * cfg.W_EI_MUT_STD
+                child.w_ei.data = torch.clamp(
+                    child.w_ei.data + w_ei_noise,
+                    cfg.W_EI_MIN, cfg.W_EI_MAX
+                )
+                w_ie_noise = torch.randn_like(child.w_ie.data) * cfg.W_IE_MUT_STD
+                child.w_ie.data = torch.clamp(
+                    child.w_ie.data + w_ie_noise,
+                    cfg.W_IE_MIN, cfg.W_IE_MAX
+                )
 
-            for attr in ['W_hormone1', 'b_hormone1', 'W_excit', 'b_excit', 'W_inhib', 'b_inhib']:
-                w = getattr(child, attr).data
-                noise = torch.randn_like(w) * cfg.HORMONE_MUT_STD
-                mask = torch.rand_like(w) < cfg.HORMONE_MUT_FRAC
-                getattr(child, attr).data = w + noise * mask
+            if has_g3:
+                for attr in ['W_hormone1', 'b_hormone1', 'W_excit', 'b_excit', 'W_inhib', 'b_inhib']:
+                    w = getattr(child, attr).data
+                    noise = torch.randn_like(w) * cfg.HORMONE_MUT_STD
+                    mask = torch.rand_like(w) < cfg.HORMONE_MUT_FRAC
+                    getattr(child, attr).data = w + noise * mask
 
         child.refresh_cached()
         child.save_genetic_baseline()
@@ -1626,6 +1708,16 @@ if __name__ == "__main__":
             print(f"  Observation: 3 food dir + 1 food dist + 5 rays x 2 + 8 self-bins + 2 tail = {cfg.OBS_DIM} dim")
             print(f"  Action fatigue: gain={cfg.FATIGUE_GAIN}, threshold={cfg.FATIGUE_THRESHOLD}, max={cfg.FATIGUE_MAX}")
             print(f"  K-frame deliberation: FRAME_RATE={cfg.FRAME_RATE}, INPUT_DECAY={cfg.INPUT_DECAY}")
+            if getattr(cfg, 'FREEZE_SCHEME', 'cycle') == 'cycle':
+                pattern = getattr(cfg, 'CYCLE_PATTERN', [('G2',), ('G1',), ('G2', 'G3'), ('G1',), ('G3',)])
+                names = {'G1': '结构', 'G2': '动力学', 'G3': '激素'}
+                shown = ['+'.join((f"{g}({names[g]})" for g in slot)) for slot in pattern]
+                print(f"  Freeze evolution: scheme=cycle, 周期序列: {' -> '.join(shown)}")
+            else:
+                print(f"  Freeze evolution: scheme={cfg.FREEZE_SCHEME}, "
+                      f"G1(结构)每{getattr(cfg, 'G1_INTERVAL', 3)}代 / "
+                      f"G2(动力学)每{getattr(cfg, 'G2_INTERVAL', 1)}代 / "
+                      f"G3(激素)每{getattr(cfg, 'G3_INTERVAL', 5)}代")
             population = [EIBrainRegion(cfg) for _ in range(cfg.POP_SIZE)]
             for ind in population:
                 ind.save_genetic_baseline()
@@ -1706,14 +1798,18 @@ if __name__ == "__main__":
 
             if gen < cfg.GENERATIONS - 1:
                 t_ev_start = time.perf_counter()
-                population = evolve_topology(population, metrics, cfg)
+                population = evolve_topology(population, metrics, cfg, gen=gen)
                 evolve_time = time.perf_counter() - t_ev_start
                 cum_evolve_time += evolve_time
             else:
                 evolve_time = 0.0
 
+            active_names = {'G1': '结构', 'G2': '动力学', 'G3': '激素'}
+            active_groups = ''.join(sorted(f"{g}({active_names[g]})" for g in _freeze_active_groups(gen, cfg))) or '无'
+
             print(f"Gen {gen+1}/{cfg.GENERATIONS} | "
                   f"BestFood: {best_food:.1f} | BestSteps: {best_steps:.1f} | AvgFood: {avg_food:.1f} | "
+                  f"Active: {active_groups} | "
                   f"Edges: {best_brain.M_in.sum().item():.0f}-in / "
                   f"{best_brain.M_rec.sum().item():.0f}-rec / "
                   f"{best_brain.M_out.sum().item():.0f}-out | "
