@@ -11,13 +11,15 @@ import multiprocessing as mp
 import networkx as nx
 import matplotlib.colors as mcolors
 
+#test5a调整了训练周期，让不同部分训练交替，以抵抗解开了Wei与Wie的训练封印带来的自由度爆炸
+
 # ==========================================
 # 0. 全局配置类（所有重要参数集中管理）
 # ==========================================
 class Config:
     # --- 进化参数 ---
     POP_SIZE = 2048
-    GENERATIONS = 200
+    GENERATIONS = 100
     ELITE_SIZE = 256
     MUT_RATE = 0.05
     TOPOLOGY_MUT_PROB = 0.05
@@ -67,7 +69,7 @@ class Config:
     HORMONE_NET_HIDDEN = 32
 
     # --- 动作疲劳参数（彻底重做：仅基于连续次数）---
-    FATIGUE_GAIN = 0.01        # 每超过阈值一次，增加的疲劳抑制量
+    FATIGUE_GAIN = 1e-5       # 每超过阈值一次，增加的疲劳抑制量
     FATIGUE_THRESHOLD = 4     # 允许连续转向的次数（如设为2，则第3次同方向转弯开始受惩罚）
     FATIGUE_MAX = 5.0         # 疲劳上限，防止无限增大
 

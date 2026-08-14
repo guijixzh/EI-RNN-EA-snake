@@ -8,9 +8,12 @@
   4) 外推 2048 pop × 100 gen × 5 ep × 300 steps 的评估总时长
 """
 import importlib.util
+import os
 import time
 import random
 import torch
+
+EXPERIMENTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'experiments')
 
 
 def load_module(name, path):
@@ -90,7 +93,7 @@ def eval_workload(mod, N, episodes=2, max_steps=200, repeats=3, seed=0):
 
 def main():
     torch.set_num_threads(4)  # 固定线程数，减少噪音
-    mod = load_module("test4b_opt", "test4b.py")
+    mod = load_module("test4b_opt", os.path.join(EXPERIMENTS, "test4b.py"))
     POP = 2048
     GEN = 100
     EP = 5

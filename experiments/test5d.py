@@ -11,21 +11,49 @@ import multiprocessing as mp
 import networkx as nx
 import matplotlib.colors as mcolors
 
+#test5a调整了训练周期，让不同部分训练交替，以抵抗解开了Wei与Wie的训练封印带来的自由度爆炸
+#test5d在test5a基础上改进进化筛选逻辑：25分前保持"同分保步数最短"（原逻辑），
+#  25分后反转筛选压力——同分时保留步数更长的个体，让高分段长蛇学会"活得久"、
+#  防止长蛇因无法第一时间获知食物位置而盲目追食、一头撞上自身身体自杀。
+#test5d v2（本次）三项改进：
+#  1. 激素网络默认不训练（TRAIN_HORMONE_NET=False 保持 0 初始化），且输出受
+#     "单柱释放"约束——每类激素同一帧最多在一个皮质柱释放（允许全 0 输出），
+#     释放强度 = sigmoid(最大 logit)。
+#  2. 进化筛选改为三元组 (food, seen, unseen)：
+#     - seen   = 看到食物时走的步数（越短越好 → 快速吃子）
+#     - unseen = 没看到食物时走的步数（越长越好 → 巡航探索/活得久）
+#     25 分前按 (food, -seen, unseen) 排序；超过 25 分改为先 unseen 再 seen：
+#     (food, unseen, -seen)，防止长蛇因无法及时获知食物位置而追食自杀。
+#  3. 动态变异：拓扑变异率/幅度按余弦退火（默认 1→0），
+#     动力学变异幅度按指数衰减 exp(-gen/tau)。
+
 # ==========================================
 # 0. 全局配置类（所有重要参数集中管理）
 # ==========================================
 class Config:
     # --- 进化参数 ---
-    POP_SIZE = 2048
-    GENERATIONS = 100
-    ELITE_SIZE = 256
-    MUT_RATE = 0.05
-    TOPOLOGY_MUT_PROB = 0.05
-    WEIGHT_MUT_FRAC = 0.2
-    WEIGHT_MUT_STD = 0.1
-    TAU_E_MUT_STD = 0.05
-    HORMONE_MUT_FRAC = 0.1
-    HORMONE_MUT_STD = 0.05
+    POP_SIZE = 2048            # 种群规模（每代个体总数）
+    GENERATIONS = 100          # 进化总代数
+    ELITE_SIZE = 256           # 精英数量（排名前 N 直接保留，兼作交叉/变异父代池）
+    MUT_RATE = 0.05            # 拓扑掩码变异概率（每个连接位置被翻转的概率）
+    TOPOLOGY_MUT_PROB = 0.05   # 拓扑突变触发概率（每个后代触发掩码翻转的概率）
+    WEIGHT_MUT_FRAC = 0.2      # 权重变异比例（每个权重张量中参与变异的元素比例）默认0.2
+    WEIGHT_MUT_STD = 0.1       # 权重变异幅度（高斯噪声标准差）默认0.1
+    TAU_E_MUT_STD = 0.05       # tau_e 动力学变异幅度（高斯噪声标准差）默认0.05
+    HORMONE_MUT_FRAC = 0.1     # 激素网络权重变异比例（参与变异的元素比例）
+    HORMONE_MUT_STD = 0.05     # 激素网络权重变异幅度（高斯噪声标准差）
+
+    # --- 动态变异控制（test5d v2 新增）---
+    # 余弦退火：EVO_COS_MODE='anneal' 单调 1→0（默认），'oscillate' 周期振荡
+    EVO_COS_MODE = 'anneal'
+    EVO_COS_PERIOD = 100        # 振荡模式用：一个完整周期的代数
+    EVO_DYN_DECAY_TAU = 33      # 动力学变异指数衰减时间常数（默认 GENERATIONS/3）
+
+    # --- 激素网络（test5d v2 新增）---
+    TRAIN_HORMONE_NET = True   # 默认不训练激素网络（保持 0 初始化）、200轮后打开
+    # 单柱释放门控：最大 logit 需严格 > 该阈值才释放（严格大于保证
+    # 0 初始化网络的 logit=0 不触发释放，激素输出恒为 0）
+    HORMONE_GATE_THRESHOLD = 0.0
 
     # --- 环境参数 ---
     GRID_SIZE = 10
@@ -41,14 +69,14 @@ class Config:
 
     # --- E-I 动力学参数 ---
     BASE_TAU_E = 0.7
-    TAU_E_NOISE = 0.1
+    TAU_E_NOISE = 0.1 #默认0.1
     TAU_E_MIN = 0.001
     TAU_E_MAX = 2.0
     W_EI = 2.0
     W_IE = 2.0
     # Wei / Wie 进化范围与变异强度（逐柱体可进化参数，与 tau_e 同类）
-    W_EI_MUT_STD = 0.1
-    W_IE_MUT_STD = 0.1
+    W_EI_MUT_STD = 0.1 #默认0.1
+    W_IE_MUT_STD = 0.1 #默认0.1
     W_EI_MIN = 0.0
     W_EI_MAX = 6.0
     W_IE_MIN = 0.0
@@ -67,7 +95,7 @@ class Config:
     HORMONE_NET_HIDDEN = 32
 
     # --- 动作疲劳参数（彻底重做：仅基于连续次数）---
-    FATIGUE_GAIN = 0.01        # 每超过阈值一次，增加的疲劳抑制量
+    FATIGUE_GAIN = 1e-5       # 每超过阈值一次，增加的疲劳抑制量
     FATIGUE_THRESHOLD = 4     # 允许连续转向的次数（如设为2，则第3次同方向转弯开始受惩罚）
     FATIGUE_MAX = 5.0         # 疲劳上限，防止无限增大
 
@@ -85,14 +113,37 @@ class Config:
     SCREEN_MULTIPLIER = 3      # 精评覆盖倍数：K = ELITE_SIZE × SCREEN_MULTIPLIER
     SCREEN_AUTO_FALLBACK = True  # 初筛种群整体过弱时自动回退全量评估
 
-    # --- 检查点 / 断点续训 / 最优模型 / 种子继承（test5_fast 专属路径）---
-    CHECKPOINT_PATH = 'test5_fast_checkpoint.pth'  # 本代码专属断点文件
-    BEST_MODEL_PATH = 'test5_fast_best_model.pth'  # 本代码专属最优模型文件
-    CHECKPOINT_FALLBACK = 'test5_checkpoint.pth'   # 旧版 test5.py 断点（自动迁移接续来源）
-    BEST_MODEL_FALLBACK = 'test5_best_model.pth'   # 旧版最优模型（种子继承后备来源）
+    # --- 进化筛选策略（test5d v2：三元组 + 25 分顺序调整）---
+    # 分数（每局平均吃食物数）超过该阈值后，精英筛选/快筛排序/历史最优
+    # 调整排序优先级：
+    #   food <= 25：key = (food, -seen, unseen) —— 先保"看见食物秒吃"（seen 短），
+    #               再保"看不见食物活得久"（unseen 长）
+    #   food >  25：key = (food, unseen, -seen) —— 先保"看不见食物活得久"（unseen 长），
+    #               再保"看见食物秒吃"（seen 短）
+    # 原理：25 分以下重点练"快速吃到食物"；25 分以上长蛇目标转向"活下去"，
+    #       优先让找不到食物时也能长时间巡航的个体存活，
+    #       防止长蛇因无法及时获知食物位置而追食自杀。
+    LONG_SNAKE_SCORE_THRESHOLD = 3.0
+
+    # --- 检查点 / 断点续训 / 最优模型 / 种子继承（test5d 专属路径）---
+    CHECKPOINT_PATH = 'test5d_checkpoint.pth'   # 本代码专属断点文件
+    BEST_MODEL_PATH = 'test5d_best_model.pth'   # 本代码专属最优模型文件
     AUTO_RESUME = True                          # 启动时自动检测并接续断点
     CHECKPOINT_INTERVAL = 5                     # 每 N 代自动保存一次（覆盖旧节点）
     SEED_FROM_BEST = True                       # 全新训练时允许以上一轮最优模型为种群种子
+
+    # --- B 方案：交替冻结进化（仅 CYCLE_PATTERN 控制）---
+    # 个体参数按功能耦合拆为三组，按代轮换激活；被冻结的组
+    # 不交叉、不变异，原样继承父代 p1（避免交叉制造失配嵌合体）：
+    #   G1 结构组：拓扑掩码 M_* + 突触权重 W_*/b_out（表现型与基因型强耦合）
+    #   G2 动力学组：tau_e_init + w_ei + w_ie（共同决定 E-I 动力学平衡）
+    #   G3 激素组：W_hormone1/b_hormone1/W_excit/b_excit/W_inhib/b_inhib
+    # 注意：默认 TRAIN_HORMONE_NET=False 使 G3 永久冻结（保持 0 初始化），
+    #       因此 CYCLE_PATTERN 只需安排 G1/G2 的交替激活；
+    #       激活组合完全由此列表控制，无其他 scheme/interval 参数。
+    CYCLE_PATTERN = [('G2','G1','G3',)] 
+    # gen%2:  0    1
+    # 激活:   G2   G1
 
 
 # ==========================================
@@ -301,6 +352,9 @@ class EIBrainRegion(nn.Module):
         self.register_buffer('hormone_inhib', torch.zeros(self.N))
         self.register_buffer('short_term_state', torch.zeros(self.N))
         self.register_buffer('consecutive_counts', torch.zeros(self.action_dim)) # 纯次数计数器
+        # 最近一帧的激素释放命令（单柱 one-hot，供验证/可视化观测）
+        self.register_buffer('last_excit_cmd', torch.zeros(self.N))
+        self.register_buffer('last_inhib_cmd', torch.zeros(self.N))
 
         self.baseline = None
 
@@ -324,10 +378,30 @@ class EIBrainRegion(nn.Module):
         total_in = ext_in + rec_in
 
         # 2. 激素调控前馈网络
+        # 输出受"单柱释放"约束（test5d v2）：每类激素同一帧最多在
+        # 一个皮质柱释放（允许全 0 输出），释放强度 = sigmoid(最大 logit)。
+        # 兴奋与抑制各自独立选择释放柱，二者可以不同。
         hormone_input = torch.cat([E_prev, I_prev, total_in], dim=-1)
         h_hidden = torch.relu(torch.matmul(self.W_hormone1, hormone_input) + self.b_hormone1)
-        excit_cmd = torch.relu(torch.matmul(self.W_excit, h_hidden) + self.b_excit)
-        inhib_cmd = torch.relu(torch.matmul(self.W_inhib, h_hidden) + self.b_inhib)
+        excit_logits = torch.matmul(self.W_excit, h_hidden) + self.b_excit
+        inhib_logits = torch.matmul(self.W_inhib, h_hidden) + self.b_inhib
+        gate_thr = float(getattr(self.cfg, 'HORMONE_GATE_THRESHOLD', 0.0))
+        # 兴奋：argmax 选柱 + 门控（最大 logit 严格 > 阈值才释放，
+        # 0 初始化网络的 logit=0 不触发释放，保持 0 输出）+ sigmoid 强度
+        max_e = excit_logits.max()
+        gate_e = (max_e > gate_thr).float()
+        excit_cmd = torch.zeros_like(excit_logits)
+        argmax_e = int(torch.argmax(excit_logits).item())
+        excit_cmd[argmax_e] = gate_e * torch.sigmoid(max_e)
+        # 抑制：同理（可释放不同柱）
+        max_i = inhib_logits.max()
+        gate_i = (max_i > gate_thr).float()
+        inhib_cmd = torch.zeros_like(inhib_logits)
+        argmax_i = int(torch.argmax(inhib_logits).item())
+        inhib_cmd[argmax_i] = gate_i * torch.sigmoid(max_i)
+        # 记录最近一帧命令（供验证/可视化；不影响动力学）
+        self.last_excit_cmd.copy_(excit_cmd)
+        self.last_inhib_cmd.copy_(inhib_cmd)
 
         # 3. 激素沿拓扑扩散 + 长期衰减（M_norm 缓存，无需每步重算）
         self.hormone_excit = (1 - self.cfg.HORMONE_DECAY) * excit_cmd + \
@@ -451,6 +525,8 @@ class EIBrainRegion(nn.Module):
         new.register_buffer('hormone_inhib', torch.zeros(self.N))
         new.register_buffer('short_term_state', torch.zeros(self.N))
         new.register_buffer('consecutive_counts', torch.zeros(self.action_dim))
+        new.register_buffer('last_excit_cmd', torch.zeros(self.N))
+        new.register_buffer('last_inhib_cmd', torch.zeros(self.N))
         new.register_buffer('W_rec_eff', torch.zeros(self.N, self.N))
         new.register_buffer('W_out_eff', torch.zeros(self.action_dim, self.N))
         new.register_buffer('M_norm', torch.zeros(self.N, self.N))
@@ -525,10 +601,23 @@ def deliberate_action(brain, obs, E, I, K=None, decay=None):
 # ==========================================
 # 3. 评估与进化逻辑
 # ==========================================
+def _obs_sees_food(obs):
+    """判断当前观测是否"看到食物"。
+
+    观测 [4:14] 为 5 条射线的 (自由路径比, 食物信号) 对，
+    任一射线食物信号 > 0 即视为看到食物（射线会被身体/墙壁遮挡，
+    比单纯的方向 bit 更真实地反映"这条蛇当前能否看到食物"）。
+    """
+    return bool(np.any(np.asarray(obs)[5:14:2] > 0.0))
+
+
 def evaluate_individual(brain, env, render=False, max_steps=None, episodes=None):
     """评估单个个体指定局数（局数可任意设置，兼容不同 EVAL_EPISODES）。
 
     - episodes=None 时取 cfg.EVAL_EPISODES。
+    - 返回三元组 (avg_food, avg_seen, avg_unseen)：
+      avg_seen   = 看到食物时走的平均步数（越短越好 → 快速吃子）
+      avg_unseen = 没看到食物时走的平均步数（越长越好 → 巡航探索/活得久）
     - 硬性淘汰"单侧转弯判死"的阈值 turn_lim 随局数等比缩放：
       原 5 局阈值 5 次 = 每局至少 1 次转向；任意局数下语义一致。
     """
@@ -539,7 +628,8 @@ def evaluate_individual(brain, env, render=False, max_steps=None, episodes=None)
         episodes = cfg.EVAL_EPISODES
 
     total_foods = []
-    total_steps_list = []
+    total_seen_list = []
+    total_unseen_list = []
     total_action_counts = [0, 0, 0]  # 统计 episodes 局总动作分布（Python list 更快）
 
     for ep in range(episodes):
@@ -549,10 +639,18 @@ def evaluate_individual(brain, env, render=False, max_steps=None, episodes=None)
         I = torch.zeros(brain.N)
 
         ep_food = 0
+        ep_seen = 0     # 看到食物时走的步数
+        ep_unseen = 0   # 没看到食物时走的步数
         steps = 0
         done = False
 
         while not done and steps < max_steps:
+            # 按当前观测归属该步：看到食物则计入 seen，否则计入 unseen
+            if _obs_sees_food(obs):
+                ep_seen += 1
+            else:
+                ep_unseen += 1
+
             # K 倍帧率思考：游戏环境此步不前进，AI 内部更新 K 次后给出实际动作
             action, avg_logits, E, I = deliberate_action(brain, obs, E, I)
 
@@ -566,10 +664,12 @@ def evaluate_individual(brain, env, render=False, max_steps=None, episodes=None)
             steps += 1
 
         total_foods.append(ep_food)
-        total_steps_list.append(steps)
+        total_seen_list.append(ep_seen)
+        total_unseen_list.append(ep_unseen)
 
     avg_food = np.mean(total_foods)
-    avg_steps = np.mean(total_steps_list)
+    avg_seen = np.mean(total_seen_list)
+    avg_unseen = np.mean(total_unseen_list)
 
     # 硬性淘汰：如果只向一侧转弯，直接判定为最差适应度。
     # 阈值随局数等比缩放：turn_lim = episodes（每局至少 1 次转向才免于判死）。
@@ -577,18 +677,94 @@ def evaluate_individual(brain, env, render=False, max_steps=None, episodes=None)
     if (total_action_counts[1] > turn_lim or total_action_counts[2] > turn_lim) and \
        (total_action_counts[1] == 0 or total_action_counts[2] == 0):
         avg_food = 0
-        avg_steps = 99999  # 强制在字典序排序中垫底
+        avg_seen = 99999    # 强制在字典序排序中垫底
+        avg_unseen = 0
 
     if render:
-        print(f"  [Render] Food: {avg_food:.1f}, Steps: {avg_steps:.1f}")
+        print(f"  [Render] Food: {avg_food:.1f}, Seen: {avg_seen:.1f}, Unseen: {avg_unseen:.1f}")
 
-    return avg_food, avg_steps
+    return avg_food, avg_seen, avg_unseen
 
 
-def evolve_topology(population, metrics_list, cfg):
+def _selection_key(metric, threshold):
+    """进化筛选排序键（test5d v2：三元组 + 25 分顺序调整）。
+
+    metric = (food, seen, unseen)：
+    - seen   = 看到食物时走的平均步数（越短越好）
+    - unseen = 没看到食物时走的平均步数（越长越好）
+
+    key 均为降序（调用方 reverse=True / max）：
+    - food <= threshold（默认 25 分）：返回 (food, -seen, unseen)
+      先保"看见食物秒吃"（seen 短），再保"看不见食物活得久"（unseen 长）
+    - food >  threshold          ：返回 (food, unseen, -seen)
+      先保"看不见食物活得久"（unseen 长），再保"看见食物秒吃"（seen 短）
+      防止长蛇因无法及时获知食物位置而追食自杀。
+    """
+    food, seen, unseen = metric
+    if food > threshold:
+        return (food, unseen, -seen)
+    return (food, -seen, unseen)
+
+
+def _freeze_active_groups(gen, cfg):
+    """按 CYCLE_PATTERN 周期计算第 gen 代激活的参数组集合。
+
+    返回 frozenset({'G1', 'G2'}) 的子集（G3 激素组因 TRAIN_HORMONE_NET=False
+    被永久冻结，不会出现在任一激活组合中）。
+    """
+    pattern = getattr(cfg, 'CYCLE_PATTERN', [('G2',), ('G1',)])
+    active = set(pattern[gen % len(pattern)])
+    # 兜底：即使 pattern 误写 G3 且激素网络未训练，也强制剔除
+    if not bool(getattr(cfg, 'TRAIN_HORMONE_NET', False)):
+        active.discard('G3')
+    return frozenset(active)
+
+
+def evolve_topology(population, metrics_list, cfg, gen=0):
+    """进化下一代（B 方案：软冻结交替优化三组参数）。
+
+    - G1 结构组（M_*/W_*/b_out）：低频搜索——拓扑与突触权重强耦合，必须一起动；
+      b_out 归入 G1（与 W_out 同属输出通路，一起交叉/变异避免失配）。
+    - G2 动力学组（tau_e_init/w_ei/w_ie）：高频微调——共同决定 E-I 动力学平衡。
+    - G3 激素组（W_hormone1/b_hormone1/W_excit/b_excit/W_inhib/b_inhib）：
+      低频稳定——独立调控回路。
+
+    被冻结的组不交叉、不变异，原样继承父代 p1
+    （child 克隆自 p1，跳过交叉与变异即天然冻结），
+    避免交叉制造"权重来自父代1、tau_e 来自父代2"的失配嵌合体。
+    """
+    active = _freeze_active_groups(gen, cfg)
+    has_g1 = 'G1' in active
+    has_g2 = 'G2' in active
+    has_g3 = 'G3' in active
+
+    # test5d v2：动态变异控制
+    #   拓扑变异（G1）率/幅度 × 余弦因子
+    #     anneal（默认）= 0.5+0.5*cos(π·gen/GENERATIONS)，单调 1→0
+    #     oscillate       = 0.5+0.5*cos(2π·gen/PERIOD)，周期振荡
+    #   动力学变异（G2）幅度 × 指数衰减 exp(-gen/EVO_DYN_DECAY_TAU)
+    cos_mode = getattr(cfg, 'EVO_COS_MODE', 'anneal')
+    if cos_mode == 'oscillate':
+        period = max(1, int(getattr(cfg, 'EVO_COS_PERIOD', 100)))
+        cos_factor = 0.5 + 0.5 * math.cos(2.0 * math.pi * gen / period)
+    else:  # 'anneal'（默认）
+        cos_factor = 0.5 + 0.5 * math.cos(math.pi * gen / max(1, float(cfg.GENERATIONS)))
+    dyn_tau = max(1e-6, float(getattr(cfg, 'EVO_DYN_DECAY_TAU', 33)))
+    dyn_factor = math.exp(-gen / dyn_tau)
+    topo_mut_prob = cfg.TOPOLOGY_MUT_PROB * cos_factor
+    mask_mut_rate = cfg.MUT_RATE * cos_factor
+    weight_mut_frac = cfg.WEIGHT_MUT_FRAC * cos_factor
+    weight_mut_std = cfg.WEIGHT_MUT_STD * cos_factor
+    tau_e_mut_std = cfg.TAU_E_MUT_STD * dyn_factor
+    w_ei_mut_std = cfg.W_EI_MUT_STD * dyn_factor
+    w_ie_mut_std = cfg.W_IE_MUT_STD * dyn_factor
+
+    # test5d：精英排序改用 _selection_key —— 25 分前先比 seen(短)再比 unseen(长)，
+    # 25 分后先比 unseen(长)再比 seen(短)（防止长蛇追食自杀）。
+    threshold = float(getattr(cfg, 'LONG_SNAKE_SCORE_THRESHOLD', 25.0))
     sorted_indices = sorted(
         range(len(metrics_list)),
-        key=lambda i: (metrics_list[i][0], -metrics_list[i][1]),
+        key=lambda i: _selection_key(metrics_list[i], threshold),
         reverse=True
     )
 
@@ -602,74 +778,89 @@ def evolve_topology(population, metrics_list, cfg):
         child = p1.clone()
         N = child.N
 
-        col_mask = torch.rand(N) > 0.5
-        row_mask = col_mask.unsqueeze(1)
-        col_mask_2d = col_mask.unsqueeze(0)
-        same_p1 = row_mask & col_mask_2d
-        same_p2 = (~row_mask) & (~col_mask_2d)
-
         with torch.no_grad():
-            child.W_in.data = torch.where(col_mask.unsqueeze(1), p1.W_in.data, p2.W_in.data)
-            child.M_in = torch.where(col_mask.unsqueeze(1), p1.M_in, p2.M_in)
+            # ---- G1 交叉：结构组（掩码 + 权重 + 输出偏置）----
+            if has_g1:
+                col_mask = torch.rand(N) > 0.5
+                row_mask = col_mask.unsqueeze(1)
+                col_mask_2d = col_mask.unsqueeze(0)
+                same_p1 = row_mask & col_mask_2d
+                same_p2 = (~row_mask) & (~col_mask_2d)
 
-            child.W_rec.data = torch.where(same_p1, p1.W_rec.data,
-                                  torch.where(same_p2, p2.W_rec.data,
-                                      torch.where(torch.rand_like(p1.W_rec.data) > 0.5,
-                                                  p1.W_rec.data, p2.W_rec.data)))
-            child.M_rec = torch.where(same_p1, p1.M_rec,
-                             torch.where(same_p2, p2.M_rec,
-                                 torch.where(torch.rand_like(p1.M_rec) > 0.5,
-                                             p1.M_rec, p2.M_rec)))
+                child.W_in.data = torch.where(col_mask.unsqueeze(1), p1.W_in.data, p2.W_in.data)
+                child.M_in = torch.where(col_mask.unsqueeze(1), p1.M_in, p2.M_in)
 
-            child.W_out.data = torch.where(col_mask.unsqueeze(0), p1.W_out.data, p2.W_out.data)
-            child.M_out = torch.where(col_mask.unsqueeze(0), p1.M_out, p2.M_out)
+                child.W_rec.data = torch.where(same_p1, p1.W_rec.data,
+                                      torch.where(same_p2, p2.W_rec.data,
+                                          torch.where(torch.rand_like(p1.W_rec.data) > 0.5,
+                                                      p1.W_rec.data, p2.W_rec.data)))
+                child.M_rec = torch.where(same_p1, p1.M_rec,
+                                 torch.where(same_p2, p2.M_rec,
+                                     torch.where(torch.rand_like(p1.M_rec) > 0.5,
+                                                 p1.M_rec, p2.M_rec)))
 
-            child.tau_e_init.data = torch.where(col_mask, p1.tau_e_init.data, p2.tau_e_init.data)
-            child.w_ei.data = torch.where(col_mask, p1.w_ei.data, p2.w_ei.data)
-            child.w_ie.data = torch.where(col_mask, p1.w_ie.data, p2.w_ie.data)
+                child.W_out.data = torch.where(col_mask.unsqueeze(0), p1.W_out.data, p2.W_out.data)
+                child.M_out = torch.where(col_mask.unsqueeze(0), p1.M_out, p2.M_out)
 
-            for attr in ['W_hormone1', 'b_hormone1', 'W_excit', 'b_excit', 'W_inhib', 'b_inhib', 'b_out']:
-                p1_t = getattr(p1, attr).data
-                p2_t = getattr(p2, attr).data
-                mask = torch.rand_like(p1_t) > 0.5
-                getattr(child, attr).data = torch.where(mask, p1_t, p2_t)
+                # 输出偏置归 G1：与 W_out 同步混合
+                mask_out = torch.rand_like(p1.b_out.data) > 0.5
+                child.b_out.data = torch.where(mask_out, p1.b_out.data, p2.b_out.data)
 
+            # ---- G2 交叉：动力学组（tau_e / Wei / Wie）----
+            if has_g2:
+                col_mask2 = torch.rand(N) > 0.5
+                child.tau_e_init.data = torch.where(col_mask2, p1.tau_e_init.data, p2.tau_e_init.data)
+                child.w_ei.data = torch.where(col_mask2, p1.w_ei.data, p2.w_ei.data)
+                child.w_ie.data = torch.where(col_mask2, p1.w_ie.data, p2.w_ie.data)
+
+            # ---- G3 交叉：激素调控网络 ----
+            if has_g3:
+                for attr in ['W_hormone1', 'b_hormone1', 'W_excit', 'b_excit', 'W_inhib', 'b_inhib']:
+                    p1_t = getattr(p1, attr).data
+                    p2_t = getattr(p2, attr).data
+                    mask = torch.rand_like(p1_t) > 0.5
+                    getattr(child, attr).data = torch.where(mask, p1_t, p2_t)
+
+        # ---- 变异（逐组独立触发，冻结组一律跳过）----
         with torch.no_grad():
-            if random.random() < cfg.TOPOLOGY_MUT_PROB:
-                m_attr = random.choice(['M_in', 'M_rec', 'M_out'])
-                m_tensor = getattr(child, m_attr)
-                mut_mask = torch.rand_like(m_tensor) < cfg.MUT_RATE
-                m_tensor[mut_mask] = 1.0 - m_tensor[mut_mask]
+            if has_g1:
+                if random.random() < topo_mut_prob:
+                    m_attr = random.choice(['M_in', 'M_rec', 'M_out'])
+                    m_tensor = getattr(child, m_attr)
+                    mut_mask = torch.rand_like(m_tensor) < mask_mut_rate
+                    m_tensor[mut_mask] = 1.0 - m_tensor[mut_mask]
 
-            for attr in ['W_in', 'W_rec', 'W_out', 'b_out']:
-                w_tensor = getattr(child, attr).data
-                noise = torch.randn_like(w_tensor) * cfg.WEIGHT_MUT_STD
-                noise_mask = torch.rand_like(w_tensor) < cfg.WEIGHT_MUT_FRAC
-                setattr(child, attr, nn.Parameter(w_tensor + noise * noise_mask))
+                for attr in ['W_in', 'W_rec', 'W_out', 'b_out']:
+                    w_tensor = getattr(child, attr).data
+                    noise = torch.randn_like(w_tensor) * weight_mut_std
+                    noise_mask = torch.rand_like(w_tensor) < weight_mut_frac
+                    setattr(child, attr, nn.Parameter(w_tensor + noise * noise_mask))
 
-            tau_noise = torch.randn_like(child.tau_e_init.data) * cfg.TAU_E_MUT_STD
-            child.tau_e_init.data = torch.clamp(
-                child.tau_e_init.data + tau_noise,
-                cfg.TAU_E_MIN, cfg.TAU_E_MAX
-            )
+            if has_g2:
+                tau_noise = torch.randn_like(child.tau_e_init.data) * tau_e_mut_std
+                child.tau_e_init.data = torch.clamp(
+                    child.tau_e_init.data + tau_noise,
+                    cfg.TAU_E_MIN, cfg.TAU_E_MAX
+                )
 
-            # Wei / Wie 逐柱体高斯变异（带边界 clamp）
-            w_ei_noise = torch.randn_like(child.w_ei.data) * cfg.W_EI_MUT_STD
-            child.w_ei.data = torch.clamp(
-                child.w_ei.data + w_ei_noise,
-                cfg.W_EI_MIN, cfg.W_EI_MAX
-            )
-            w_ie_noise = torch.randn_like(child.w_ie.data) * cfg.W_IE_MUT_STD
-            child.w_ie.data = torch.clamp(
-                child.w_ie.data + w_ie_noise,
-                cfg.W_IE_MIN, cfg.W_IE_MAX
-            )
+                # Wei / Wie 逐柱体高斯变异（带边界 clamp，幅度受指数衰减）
+                w_ei_noise = torch.randn_like(child.w_ei.data) * w_ei_mut_std
+                child.w_ei.data = torch.clamp(
+                    child.w_ei.data + w_ei_noise,
+                    cfg.W_EI_MIN, cfg.W_EI_MAX
+                )
+                w_ie_noise = torch.randn_like(child.w_ie.data) * w_ie_mut_std
+                child.w_ie.data = torch.clamp(
+                    child.w_ie.data + w_ie_noise,
+                    cfg.W_IE_MIN, cfg.W_IE_MAX
+                )
 
-            for attr in ['W_hormone1', 'b_hormone1', 'W_excit', 'b_excit', 'W_inhib', 'b_inhib']:
-                w = getattr(child, attr).data
-                noise = torch.randn_like(w) * cfg.HORMONE_MUT_STD
-                mask = torch.rand_like(w) < cfg.HORMONE_MUT_FRAC
-                getattr(child, attr).data = w + noise * mask
+            if has_g3:
+                for attr in ['W_hormone1', 'b_hormone1', 'W_excit', 'b_excit', 'W_inhib', 'b_inhib']:
+                    w = getattr(child, attr).data
+                    noise = torch.randn_like(w) * cfg.HORMONE_MUT_STD
+                    mask = torch.rand_like(w) < cfg.HORMONE_MUT_FRAC
+                    getattr(child, attr).data = w + noise * mask
 
         child.refresh_cached()
         child.save_genetic_baseline()
@@ -691,10 +882,11 @@ def plot_history(history):
     ax1.legend()
     ax1.grid(True, alpha=0.3)
 
-    ax2.plot(history['gen'], history['best_steps'], label='Best Steps', color='green', marker='s', markersize=3)
-    ax2.set_title("Best Individual Steps (Lower = Better, among top food)")
+    ax2.plot(history['gen'], history['best_seen'], label='Best Seen Steps', color='green', marker='s', markersize=3)
+    ax2.plot(history['gen'], history['best_unseen'], label='Best Unseen Steps', color='purple', marker='^', markersize=3)
+    ax2.set_title("Best Individual Seen/Unseen Steps\n(Seen lower=better, Unseen higher=better)")
     ax2.set_xlabel("Generation")
-    ax2.set_ylabel("Steps Survived")
+    ax2.set_ylabel("Steps")
     ax2.legend()
     ax2.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -1303,6 +1495,8 @@ def load_brain_state(state, cfg):
     new.register_buffer('hormone_inhib', torch.zeros(new.N))
     new.register_buffer('short_term_state', torch.zeros(new.N))
     new.register_buffer('consecutive_counts', torch.zeros(new.action_dim))
+    new.register_buffer('last_excit_cmd', torch.zeros(new.N))
+    new.register_buffer('last_inhib_cmd', torch.zeros(new.N))
     new.register_buffer('W_rec_eff', torch.zeros(new.N, new.N))
     new.register_buffer('W_out_eff', torch.zeros(new.action_dim, new.N))
     new.register_buffer('M_norm', torch.zeros(new.N, new.N))
@@ -1533,24 +1727,30 @@ def evaluate_population(population, cfg, env, pool=None):
         # 精评名单已覆盖全种群：直接全量评估，避免二次开销
         return _eval_batch(population, cfg, pool, episodes, env)
 
+    # test5d：快筛排序改用 _selection_key —— 25 分前保最短步数，
+    # 25 分后保更长步数（防止长蛇追食自杀）。
+    threshold = float(getattr(cfg, 'LONG_SNAKE_SCORE_THRESHOLD', 25.0))
     order = sorted(range(len(population)),
-                   key=lambda i: (quick[i][0], -quick[i][1]),
+                   key=lambda i: _selection_key(quick[i], threshold),
                    reverse=True)
     refine_idx = set(order[:k])
     refine_list = [population[i] for i in range(len(population)) if i in refine_idx]
 
     extra = _eval_batch(refine_list, cfg, pool, episodes - screen_ep, env)
 
-    # --- 汇总 ---
+    # --- 汇总（三元组各字段分别加权平均：food / seen / unseen）---
     metrics = [None] * len(population)
     ref_pos = 0
     for i in range(len(population)):
         if i in refine_idx:
-            f_q, s_q = quick[i]
-            f_e, s_e = extra[ref_pos]
+            f_q, se_q, un_q = quick[i]
+            f_e, se_e, un_e = extra[ref_pos]
             ref_pos += 1
-            metrics[i] = ((f_q * screen_ep + f_e * (episodes - screen_ep)) / episodes,
-                          (s_q * screen_ep + s_e * (episodes - screen_ep)) / episodes)
+            w_q = screen_ep / episodes
+            w_e = (episodes - screen_ep) / episodes
+            metrics[i] = (f_q * w_q + f_e * w_e,
+                          se_q * w_q + se_e * w_e,
+                          un_q * w_q + un_e * w_e)
         else:
             metrics[i] = quick[i]
     return metrics
@@ -1586,22 +1786,18 @@ if __name__ == "__main__":
     # ---- 断点自动接续（含旧版断点迁移）----
     start_gen = 0
     population = None
-    history = {'gen': [], 'best_food': [], 'avg_food': [], 'best_steps': []}
+    history = {'gen': [], 'best_food': [], 'avg_food': [],
+               'best_seen': [], 'best_unseen': []}
     cum_eval_time = 0.0
     cum_evolve_time = 0.0
     best_ever_brain = None
     best_ever_food = -1.0
     best_ever_steps = 0.0
+    best_ever_seen = 0.0
+    best_ever_unseen = 0.0
 
     if cfg.AUTO_RESUME:
         ckpt_path = cfg.CHECKPOINT_PATH
-        # 迁移兼容：专属断点不存在时，自动接续旧版 test5.py 断点
-        if (not os.path.exists(ckpt_path) and
-                getattr(cfg, 'CHECKPOINT_FALLBACK', None) and
-                os.path.exists(cfg.CHECKPOINT_FALLBACK)):
-            print(f"[Migrate] 未发现新断点 {ckpt_path}，检测到旧版断点 "
-                  f"{cfg.CHECKPOINT_FALLBACK}，将自动迁移接续")
-            ckpt_path = cfg.CHECKPOINT_FALLBACK
         if os.path.exists(ckpt_path):
             ckpt = load_checkpoint(ckpt_path, cfg)
             if ckpt is not None:
@@ -1613,6 +1809,12 @@ if __name__ == "__main__":
                 best_ever_brain = ckpt['best_brain']
                 best_ever_food = ckpt['best_food']
                 best_ever_steps = ckpt['best_steps']
+                if best_ever_brain is not None:
+                    best_ever_seen = float(getattr(best_ever_brain, '_track_seen', 0.0))
+                    best_ever_unseen = float(getattr(best_ever_brain, '_track_unseen', 0.0))
+                # 兼容旧版断点：history 可能缺 best_seen/best_unseen（旧版为 best_steps）
+                history.setdefault('best_seen', list(history.get('best_steps', [])))
+                history.setdefault('best_unseen', list(history.get('best_steps', [])))
                 last_done = history['gen'][-1] + 1 if history['gen'] else 0
                 print(f"\n=== 检测到断点 [{ckpt_path}] ===")
                 print(f"  {cfg.GENERATIONS} 代中已完成 {last_done} 代 -> 从第 {start_gen} 代接续 | "
@@ -1626,6 +1828,18 @@ if __name__ == "__main__":
             print(f"  Observation: 3 food dir + 1 food dist + 5 rays x 2 + 8 self-bins + 2 tail = {cfg.OBS_DIM} dim")
             print(f"  Action fatigue: gain={cfg.FATIGUE_GAIN}, threshold={cfg.FATIGUE_THRESHOLD}, max={cfg.FATIGUE_MAX}")
             print(f"  K-frame deliberation: FRAME_RATE={cfg.FRAME_RATE}, INPUT_DECAY={cfg.INPUT_DECAY}")
+            # 打印实际生效的激活周期（过滤被永久冻结的 G3 激素组）
+            pattern = getattr(cfg, 'CYCLE_PATTERN', [('G2',), ('G1',)])
+            names = {'G1': '结构', 'G2': '动力学', 'G3': '激素'}
+            train_hormone = bool(getattr(cfg, 'TRAIN_HORMONE_NET', False))
+            shown = ['+'.join(f"{g}({names[g]})" for g in slot
+                              if not (g == 'G3' and not train_hormone)) or '无'
+                     for slot in pattern]
+            print(f"  Freeze evolution: CYCLE_PATTERN 周期序列: {' -> '.join(shown)}")
+            # test5d：打印高分保长蛇筛选策略
+            print(f"  Selection strategy: LONG_SNAKE_SCORE_THRESHOLD="
+                  f"{float(getattr(cfg, 'LONG_SNAKE_SCORE_THRESHOLD', 25.0))} "
+                  f"(≤阈值保最短步数, >阈值保更长步数)")
             population = [EIBrainRegion(cfg) for _ in range(cfg.POP_SIZE)]
             for ind in population:
                 ind.save_genetic_baseline()
@@ -1633,13 +1847,6 @@ if __name__ == "__main__":
             # ---- 种子继承（方案 1）：以已有最优模型作为种群的精英个体 ----
             if cfg.SEED_FROM_BEST:
                 seed_path = cfg.BEST_MODEL_PATH
-                # 迁移兼容：专属最优模型不存在时，回退旧版最优模型作种子
-                if (not os.path.exists(seed_path) and
-                        getattr(cfg, 'BEST_MODEL_FALLBACK', None) and
-                        os.path.exists(cfg.BEST_MODEL_FALLBACK)):
-                    print(f"  [Seed] 未发现新最优模型 {seed_path}，改用旧版 "
-                          f"{cfg.BEST_MODEL_FALLBACK} 作为种子")
-                    seed_path = cfg.BEST_MODEL_FALLBACK
                 seed_result = load_best_model_brain(seed_path, cfg)
                 if seed_result is not None:
                     seed, seed_food, seed_steps = seed_result
@@ -1684,36 +1891,55 @@ if __name__ == "__main__":
             eval_time = time.perf_counter() - t_gen_start
             cum_eval_time += eval_time
 
+            # test5d v2：本代最优个体使用 _selection_key
+            # （25 分前先比 seen 短再比 unseen 长，25 分后先比 unseen 长再比 seen 短）。
+            threshold = float(getattr(cfg, 'LONG_SNAKE_SCORE_THRESHOLD', 25.0))
             best_idx = max(range(len(metrics)),
-                           key=lambda i: (metrics[i][0], -metrics[i][1]))
+                           key=lambda i: _selection_key(metrics[i], threshold))
             best_food = metrics[best_idx][0]
-            best_steps = metrics[best_idx][1]
+            best_seen = metrics[best_idx][1]
+            best_unseen = metrics[best_idx][2]
             avg_food = np.mean([m[0] for m in metrics])
 
             history['gen'].append(gen)
             history['best_food'].append(best_food)
             history['avg_food'].append(avg_food)
-            history['best_steps'].append(best_steps)
+            history['best_seen'].append(best_seen)
+            history['best_unseen'].append(best_unseen)
 
             best_brain = population[best_idx]
 
-            # 跨代跟踪历史最优个体（不受 evolve_topology 替换影响）
+            # 跨代跟踪历史最优个体（不受 evolve_topology 替换影响），
+            # 与筛选顺序一致：高分段优先 unseen 长，低分段优先 seen 短。
+            prev_seen = float(getattr(best_ever_brain, '_track_seen', best_ever_seen))
+            prev_unseen = float(getattr(best_ever_brain, '_track_unseen', best_ever_unseen))
             if (best_food > best_ever_food or
-                    (best_food == best_ever_food and best_steps < best_ever_steps)):
+                    (best_food == best_ever_food and
+                     ((best_food > threshold and best_unseen > prev_unseen) or
+                      (best_food <= threshold and best_seen < prev_seen)))):
                 best_ever_food = best_food
-                best_ever_steps = best_steps
+                best_ever_steps = best_seen + best_unseen
+                best_ever_seen = best_seen
+                best_ever_unseen = best_unseen
                 best_ever_brain = best_brain.clone()
+                # 在克隆体上记录跟踪指标，便于跨代比较
+                best_ever_brain._track_seen = best_seen
+                best_ever_brain._track_unseen = best_unseen
 
             if gen < cfg.GENERATIONS - 1:
                 t_ev_start = time.perf_counter()
-                population = evolve_topology(population, metrics, cfg)
+                population = evolve_topology(population, metrics, cfg, gen=gen)
                 evolve_time = time.perf_counter() - t_ev_start
                 cum_evolve_time += evolve_time
             else:
                 evolve_time = 0.0
 
+            active_names = {'G1': '结构', 'G2': '动力学', 'G3': '激素'}
+            active_groups = ''.join(sorted(f"{g}({active_names[g]})" for g in _freeze_active_groups(gen, cfg))) or '无'
+
             print(f"Gen {gen+1}/{cfg.GENERATIONS} | "
-                  f"BestFood: {best_food:.1f} | BestSteps: {best_steps:.1f} | AvgFood: {avg_food:.1f} | "
+                  f"BestFood: {best_food:.1f} | BestSeen: {best_seen:.1f} | BestUnseen: {best_unseen:.1f} | AvgFood: {avg_food:.1f} | "
+                  f"Active: {active_groups} | "
                   f"Edges: {best_brain.M_in.sum().item():.0f}-in / "
                   f"{best_brain.M_rec.sum().item():.0f}-rec / "
                   f"{best_brain.M_out.sum().item():.0f}-out | "

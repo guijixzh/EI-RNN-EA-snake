@@ -1,20 +1,18 @@
-"""test5b：CNN 前端 + E-I 皮质柱进化（完整参考 test5a.py 重建）。
+"""test5c：预训练 CNN 前端（贪心教师蒸馏，16 维特征）+ E-I 皮质柱进化（无疲劳）。
 
-相对 test5a.py 的改动（本质仅更换输入模块）：
-  1. 输入：10x10x5 网格 -> CNNEncoder（冻结，全局共享）-> 24 维投影特征
-  2. EI 输入维度保持 24（CNN 投影头输出）；不再继承 test5a 模型
-     （两位的 24 维语义不同：test5a=手工特征布局，test5b=CNN 语义特征）
-  3. K 帧思考：每个游戏步 CNN 只算 1 次特征，K 帧内特征复用
-  4. 其余进化机制与 test5a 完全一致：多进程并行评估（A 方案）、
-     两阶段筛选（C 方案）、G1/G2/G3 冻结交替、断点续训、最优模型保存
-  5. seed 继承 / 版本迁移全部禁用：全新随机初始化，test5b 专用 checkpoint/best 路径
+任务背景（相对 test5a / test5b 的改动）：
+  1. 感知模块改为预训练 CNN：10x10x5 网格 -> CNNEncoder（冻结，全局共享）
+     -> 16 维投影特征（输入维度压缩到 16），再接入 EI 网络。
+  2. CNN 由「简单贪心算法」教师（ExpertSnakeAI，test5b 材料）软标签蒸馏预训练：
+     训练脚本 test5c/train_cnn.py；数据集复用 test5b/dataset.npz。
+  3. 去除多余的疲劳机制：删除 FATIGUE_* 配置、consecutive_counts、
+     update_fatigue()、forward 中的动作疲劳抑制项。
+  4. 保留 test5a 全部进化机制：多进程并行评估（A 方案）、两阶段筛选（C 方案）、
+     G1/G2/G3 冻结交替进化、断点续训、最优模型保存、可视化。
 
-多进程说明：test5a 的多线程/多进程评估本身没有问题（问题此前出在
-env.py 的 _place_food 在满盘时随机重试死循环，已修复为空格枚举）。
-因此本文件恢复 test5a 的 mp.Pool 并行评估。
-
-用法：
-    python test5b/test5b.py            # 断点自动接续或全新训练
+运行：
+    python test5c/train_cnn.py --data test5b/dataset.npz --out test5c/cnn_encoder_16.pth
+    python test5c/test5c.py
 """
 import torch
 import torch.nn as nn
@@ -32,9 +30,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from env import SnakeEnv
 from cnn import CNNEncoder, load_cnn_encoder
 
-
+#再次尝试结合CNN，失败
 # ==========================================
-# 0. 全局配置类（test5a 全套参数 + CNN 专属；禁用 seed/fallback）
+# 0. 全局配置类（test5a 全套参数 + CNN 专属；无疲劳；test5c 专用路径）
 # ==========================================
 class Config:
     # --- 进化参数（与 test5a 一致） ---
@@ -56,7 +54,7 @@ class Config:
 
     # --- 脑结构参数 ---
     NUM_COLUMNS = 256
-    OBS_DIM = 24            # CNN 投影头输出维度（语义特征，非 test5a 手工特征）
+    OBS_DIM = 16            # CNN 投影头输出维度（test5c 压缩观测到 16）
     ACTION_DIM = 3
     INIT_DENSITY = 0.15
 
@@ -86,18 +84,13 @@ class Config:
     INHIB_DIFFUSION = 0.40
     HORMONE_NET_HIDDEN = 32
 
-    # --- 动作疲劳参数 ---
-    FATIGUE_GAIN = 0.01
-    FATIGUE_THRESHOLD = 4
-    FATIGUE_MAX = 5.0
-
     # --- K 倍帧率思考 ---
     FRAME_RATE = 5
     INPUT_DECAY = 0.9
 
     # --- 交替冻结进化（与 test5a 一致） ---
     FREEZE_SCHEME = 'cycle'
-    CYCLE_PATTERN = [('G2',), ('G1',), ('G2', 'G3'), ('G1',), ('G3',)]
+    CYCLE_PATTERN = [('G2',), ('G3',),('G3','G2',), ( 'G1',),  ('G3',)]
     G1_INTERVAL = 3
     G2_INTERVAL = 1
     G3_INTERVAL = 5
@@ -110,19 +103,19 @@ class Config:
     SCREEN_MULTIPLIER = 3
     SCREEN_AUTO_FALLBACK = True
 
-    # --- 检查点 / 最优模型（test5b 专用路径；禁用旧版迁移与种子继承） ---
-    CHECKPOINT_PATH = 'test5b/test5b_checkpoint.pth'
-    BEST_MODEL_PATH = 'test5b/test5b_best_model.pth'
-    CNN_PATH = 'test5b/cnn_encoder.pth'
-    CHECKPOINT_FALLBACK = None      # 禁用：不迁移 test5a 断点（24 维语义不同）
-    BEST_MODEL_FALLBACK = None      # 禁用：不注入 test5a 最优模型作种子
+    # --- 检查点 / 最优模型 / CNN（test5c 专用路径；禁用旧版迁移与种子继承） ---
+    CHECKPOINT_PATH = 'test5c/test5c_checkpoint.pth'
+    BEST_MODEL_PATH = 'test5c/test5c_best_model.pth'
+    CNN_PATH = 'test5c/cnn_encoder_16.pth'
+    CHECKPOINT_FALLBACK = None      # 禁用：不迁移 test5a/test5b 断点（OBS_DIM 不同）
+    BEST_MODEL_FALLBACK = None      # 禁用：不注入旧版最优模型作种子（观测语义不同）
     AUTO_RESUME = True
     CHECKPOINT_INTERVAL = 5
     SEED_FROM_BEST = False          # 禁用：全新随机初始化
 
 
 # ==========================================
-# 1. E-I 皮质柱脑区模型（test5a 逻辑；输入改为 CNN 投影特征）
+# 1. E-I 皮质柱脑区模型（test5a 逻辑；输入改为 CNN 16 维投影特征；无疲劳）
 # ==========================================
 class EIBrainRegion(nn.Module):
     def __init__(self, cfg, cnn=None):
@@ -168,11 +161,10 @@ class EIBrainRegion(nn.Module):
         self.W_inhib = nn.Parameter(torch.zeros(self.N, cfg.HORMONE_NET_HIDDEN))
         self.b_inhib = nn.Parameter(torch.zeros(self.N))
 
-        # --- 运行时状态（非进化参数） ---
+        # --- 运行时状态（非进化参数；无疲劳计数） ---
         self.register_buffer('hormone_excit', torch.zeros(self.N))
         self.register_buffer('hormone_inhib', torch.zeros(self.N))
         self.register_buffer('short_term_state', torch.zeros(self.N))
-        self.register_buffer('consecutive_counts', torch.zeros(self.action_dim))
 
         self.baseline = None
 
@@ -186,16 +178,15 @@ class EIBrainRegion(nn.Module):
         self.hormone_excit.zero_()
         self.hormone_inhib.zero_()
         self.short_term_state.zero_()
-        self.consecutive_counts.zero_()
 
     def encode_grid(self, grid_t):
-        """网格(1,10,10,5) -> 24 维投影特征（冻结 CNN，单前向）。"""
+        """网格(1,10,10,5) -> 16 维投影特征（冻结 CNN，单前向）。"""
         with torch.no_grad():
-            feat = self.cnn(grid_t)   # (1, 24)
+            feat = self.cnn(grid_t)   # (1, 16)
         return feat
 
     def forward(self, obs_in, E_prev, I_prev):
-        """obs_in: (24,) 已由 CNN 投影的特征向量（每游戏步计算一次）。"""
+        """obs_in: (16,) 已由 CNN 投影的特征向量（每游戏步计算一次）。"""
         # 1. 外部与循环输入
         ext_in = torch.matmul(self.W_in * self.M_in, obs_in)
         rec_in = torch.matmul(self.W_rec_eff, E_prev)
@@ -241,18 +232,7 @@ class EIBrainRegion(nn.Module):
         # 7. 动作输出
         action_logits = torch.matmul(self.W_out_eff, E_new) + self.b_out
 
-        # 8. 动作疲劳抑制
-        fatigue = torch.relu(self.consecutive_counts - self.cfg.FATIGUE_THRESHOLD) * self.cfg.FATIGUE_GAIN
-        fatigue = torch.clamp(fatigue, max=self.cfg.FATIGUE_MAX)
-        action_logits = action_logits - fatigue
-
         return action_logits, E_new, I_new
-
-    def update_fatigue(self, action):
-        with torch.no_grad():
-            cur = float(self.consecutive_counts[action]) + 1.0
-            self.consecutive_counts.zero_()
-            self.consecutive_counts[action] = cur
 
     def refresh_cached(self):
         with torch.no_grad():
@@ -309,7 +289,6 @@ class EIBrainRegion(nn.Module):
         new.register_buffer('hormone_excit', torch.zeros(self.N))
         new.register_buffer('hormone_inhib', torch.zeros(self.N))
         new.register_buffer('short_term_state', torch.zeros(self.N))
-        new.register_buffer('consecutive_counts', torch.zeros(self.action_dim))
         new.register_buffer('W_rec_eff', torch.zeros(self.N, self.N))
         new.register_buffer('W_out_eff', torch.zeros(self.action_dim, self.N))
         new.register_buffer('M_norm', torch.zeros(self.N, self.N))
@@ -341,7 +320,7 @@ class EIBrainRegion(nn.Module):
 
 
 # ==========================================
-# 2. K 倍帧率思考（CNN 特征每游戏步算 1 次，K 帧复用）
+# 2. K 倍帧率思考（CNN 特征每游戏步算 1 次，K 帧复用；无疲劳）
 # ==========================================
 def deliberate_action(brain, grid_t, E, I, K=None, decay=None):
     """每个游戏步：CNN 算 1 次特征，K 帧内部更新复用特征，输出平均 logits。"""
@@ -352,7 +331,7 @@ def deliberate_action(brain, grid_t, E, I, K=None, decay=None):
         decay = cfg.INPUT_DECAY
 
     # CNN 特征：每游戏步只算 1 次（冻结，no_grad）
-    feat = brain.encode_grid(grid_t)          # (1, 24)
+    feat = brain.encode_grid(grid_t)          # (1, 16)
     scales = [decay ** k for k in range(K)]
     logits_sum = None
     with torch.no_grad():
@@ -370,7 +349,7 @@ def deliberate_action(brain, grid_t, E, I, K=None, decay=None):
 
 
 # ==========================================
-# 3. 评估与进化逻辑（test5a 逻辑；输入改为 CNN 网格特征）
+# 3. 评估与进化逻辑（test5a 逻辑；输入改为 CNN 网格特征；无疲劳）
 # ==========================================
 def evaluate_individual(brain, env, render=False, max_steps=None, episodes=None):
     """评估单个个体指定局数（与 test5a 语义一致）。
@@ -401,7 +380,6 @@ def evaluate_individual(brain, env, render=False, max_steps=None, episodes=None)
             grid_t = torch.from_numpy(env._get_grid_state()).unsqueeze(0)  # (1,10,10,5)
             action, avg_logits, E, I = deliberate_action(brain, grid_t, E, I)
 
-            brain.update_fatigue(action)
             total_action_counts[action] += 1
 
             _, ate_food, done = env.step(action)
@@ -415,12 +393,10 @@ def evaluate_individual(brain, env, render=False, max_steps=None, episodes=None)
     avg_food = np.mean(total_foods)
     avg_steps = np.mean(total_steps_list)
 
-    # 硬性淘汰：如果只向一侧转弯，直接判定为最差适应度（test5a 同源逻辑）
-    turn_lim = max(episodes, 1)
-    if (total_action_counts[1] > turn_lim or total_action_counts[2] > turn_lim) and \
-       (total_action_counts[1] == 0 or total_action_counts[2] == 0):
-        avg_food = 0
-        avg_steps = 99999
+    # 退化动作不做硬判死：B2 的 (food, steps) 排序已让"5 步速死"的
+    # 单动作个体自然垫底（存活步数大者优先），硬判死反而会误杀
+    # 极小随机网络里"唯一能勉强存活但动作单一"的基因。
+    # （test5a 的 Left/Right-only 硬淘汰在此一并移除。）
 
     if render:
         print(f"  [Render] Food: {avg_food:.1f}, Steps: {avg_steps:.1f}")
@@ -455,9 +431,12 @@ def evolve_topology(population, metrics_list, cfg, gen=0):
     has_g2 = 'G2' in active
     has_g3 = 'G3' in active
 
+    # B2：排序 key 由 (food, -steps) 改为 (food, steps)。
+    # 原实现同 food 时偏好步数少（速死），在低 food 阶段实际奖励
+    # "撞墙速死"，与求生探索背道而驰。现改为存活步数大者优先。
     sorted_indices = sorted(
         range(len(metrics_list)),
-        key=lambda i: (metrics_list[i][0], -metrics_list[i][1]),
+        key=lambda i: (metrics_list[i][0], metrics_list[i][1]),
         reverse=True
     )
 
@@ -564,7 +543,7 @@ def evolve_topology(population, metrics_list, cfg, gen=0):
 # ==========================================
 # 4. 可视化（简化：进化曲线 + 简单渲染）
 # ==========================================
-def plot_history(history, save_path='test5b/evolution.png'):
+def plot_history(history, save_path='test5c/evolution.png'):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
     ax1.plot(history['gen'], history['best_food'], label='Best Food', color='red', marker='o', markersize=3)
     ax1.plot(history['gen'], history['avg_food'], label='Avg Food', color='blue', alpha=0.6)
@@ -600,7 +579,6 @@ def visualize_best_brain_play(brain, cfg, max_steps=300):
     while not done and steps < max_steps:
         grid_t = torch.from_numpy(env._get_grid_state()).unsqueeze(0)
         action, avg_logits, E, I = deliberate_action(brain, grid_t, E, I)
-        brain.update_fatigue(action)
         _, _, done = env.step(action)
         steps += 1
 
@@ -609,7 +587,7 @@ def visualize_best_brain_play(brain, cfg, max_steps=300):
 
 
 # ==========================================
-# 5. 检查点 / 断点续训 / 最优模型（test5b 专用；适配 CNN 共享）
+# 5. 检查点 / 断点续训 / 最优模型（test5c 专用；适配 CNN 共享；无疲劳）
 # ==========================================
 def _config_dict(cfg):
     merged = {}
@@ -674,7 +652,6 @@ def load_brain_state(state, cfg, cnn):
     new.register_buffer('hormone_excit', torch.zeros(new.N))
     new.register_buffer('hormone_inhib', torch.zeros(new.N))
     new.register_buffer('short_term_state', torch.zeros(new.N))
-    new.register_buffer('consecutive_counts', torch.zeros(new.action_dim))
     new.register_buffer('W_rec_eff', torch.zeros(new.N, new.N))
     new.register_buffer('W_out_eff', torch.zeros(new.action_dim, new.N))
     new.register_buffer('M_norm', torch.zeros(new.N, new.N))
@@ -783,7 +760,7 @@ def load_best_model_brain(path, cfg, cnn):
 
 # ==========================================
 # 6. 加速训练：多进程并行评估（A 方案）+ 两阶段快速筛选（C 方案）
-#    （与 test5a 完全一致；worker 内加载一次冻结 CNN 并缓存）
+#    （与 test5a 一致；worker 内加载一次冻结 CNN 并缓存）
 # ==========================================
 def _worker_cfg_from_dict(cfg_dict):
     tmp = type('_RtCfg', (), {})()
@@ -877,8 +854,9 @@ def evaluate_population(population, cfg, env, pool=None):
     if k >= len(population):
         return _eval_batch(population, cfg, pool, episodes, env)
 
+    # B2：初筛排序同样按 (food, steps)，与进化语义一致
     order = sorted(range(len(population)),
-                   key=lambda i: (quick[i][0], -quick[i][1]),
+                   key=lambda i: (quick[i][0], quick[i][1]),
                    reverse=True)
     refine_idx = set(order[:k])
     refine_list = [population[i] for i in range(len(population)) if i in refine_idx]
@@ -911,7 +889,7 @@ def make_eval_pool(cfg):
 
 
 # ==========================================
-# 7. 主循环（test5a 逻辑；移除种子继承/版本迁移；CNN 前置加载）
+# 7. 主循环（test5a 逻辑；无疲劳；无种子继承/版本迁移；CNN 前置加载）
 # ==========================================
 if __name__ == "__main__":
     cfg = Config()
@@ -920,15 +898,15 @@ if __name__ == "__main__":
     # ---- 前置校验：冻结 CNN 必须存在 ----
     if not os.path.exists(cfg.CNN_PATH):
         print(f"[FATAL] CNN 编码器不存在: {cfg.CNN_PATH}")
-        print("请先运行: python test5b/train_cnn.py --data test5b/dataset.npz "
-              "--out test5b/cnn_encoder.pth")
+        print("请先运行: python test5c/train_cnn.py --data test5b/dataset.npz "
+              "--out test5c/cnn_encoder_16.pth")
         sys.exit(1)
     cnn = load_cnn_encoder(cfg.CNN_PATH)
-    print(f"[CNN] 已加载冻结编码器 {cfg.CNN_PATH}")
+    print(f"[CNN] 已加载冻结编码器 {cfg.CNN_PATH} (输出 {cnn.proj_dim} 维特征)")
 
     t_program = time.perf_counter()
 
-    # ---- 断点自动接续（仅 test5b 专用路径，无版本迁移） ----
+    # ---- 断点自动接续（仅 test5c 专用路径，无版本迁移） ----
     start_gen = 0
     population = None
     history = {'gen': [], 'best_food': [], 'avg_food': [], 'best_steps': []}
@@ -963,6 +941,7 @@ if __name__ == "__main__":
             print("Initializing Population...")
             print(f"  输入: CNN(10x10x5) -> {cfg.OBS_DIM} 维语义特征 -> EI({cfg.NUM_COLUMNS} 柱)")
             print(f"  K-frame deliberation: FRAME_RATE={cfg.FRAME_RATE}, INPUT_DECAY={cfg.INPUT_DECAY}")
+            print(f"  疲劳机制: 已去除（无 FATIGUE_* / consecutive_counts / update_fatigue）")
             if getattr(cfg, 'FREEZE_SCHEME', 'cycle') == 'cycle':
                 pattern = getattr(cfg, 'CYCLE_PATTERN', [('G2',), ('G1',), ('G2', 'G3'), ('G1',), ('G3',)])
                 names = {'G1': '结构', 'G2': '动力学', 'G3': '激素'}
@@ -1003,8 +982,9 @@ if __name__ == "__main__":
             eval_time = time.perf_counter() - t_gen_start
             cum_eval_time += eval_time
 
+            # B2：主循环最优指标与进化排序一致（同 food 步数大者优先）
             best_idx = max(range(len(metrics)),
-                           key=lambda i: (metrics[i][0], -metrics[i][1]))
+                           key=lambda i: (metrics[i][0], metrics[i][1]))
             best_food = metrics[best_idx][0]
             best_steps = metrics[best_idx][1]
             avg_food = np.mean([m[0] for m in metrics])
@@ -1075,7 +1055,7 @@ if __name__ == "__main__":
     print(f"\nTotal runtime: {time.perf_counter() - t_program:.1f}s "
           f"(eval {cum_eval_time:.1f}s / evolve {cum_evolve_time:.1f}s)")
 
-    # ---- 训练完成：保存 test5b 专用最优模型 ----
+    # ---- 训练完成：保存 test5c 专用最优模型 ----
     if best_ever_brain is None:
         best_ever_brain = population[0]
     save_best_model(cfg.BEST_MODEL_PATH, best_ever_brain, cfg,

@@ -7,10 +7,13 @@
   3) 正确性：两版在相同 seed 下应产生完全一致的结果（best_food/best_steps）
 """
 import importlib.util
+import os
 import time
 import random
 import torch
 import numpy as np
+
+EXPERIMENTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'experiments')
 
 
 def load_module(name, path):
@@ -113,8 +116,8 @@ def fmt(sec):
 
 
 def main():
-    orig = load_module("test4b_orig", "test4b_orig.py")
-    opt = load_module("test4b_opt", "test4b.py")
+    orig = load_module("test4b_orig", os.path.join(EXPERIMENTS, "test4b_orig.py"))
+    opt = load_module("test4b_opt", os.path.join(EXPERIMENTS, "test4b.py"))
 
     # ---------- 1) forward 步耗时 ----------
     t_orig = run_forward_bench(orig)

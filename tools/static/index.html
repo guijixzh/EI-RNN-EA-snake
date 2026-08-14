@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🧠 E-I 皮质柱脑 · 贪吃蛇实时可视化</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2330;
+    --border: #2d3648; --text: #dce3ee; --muted: #8b98ab; --accent: #4aa8ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-size: 13px; overflow: hidden;
+  }
+  #app { display: flex; flex-direction: column; height: 100vh; }
+
+  /* ===== 顶栏 ===== */
+  header {
+    display: flex; align-items: center; gap: 14px;
+    padding: 7px 16px;
+    background: linear-gradient(180deg, #1a2130, #141a24);
+    border-bottom: 1px solid var(--border); flex-wrap: wrap; flex: none;
+  }
+  header h1 { font-size: 16px; font-weight: 600; letter-spacing: .5px; white-space: nowrap; }
+  header h1 small { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px; }
+  .chip {
+    background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 3px 9px; font-size: 12px; white-space: nowrap;
+  }
+  .chip b { color: #7ee2ff; }
+  .controls { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+  .controls select, .controls button {
+    background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 5px 11px; font-size: 12px; cursor: pointer;
+  }
+  .controls button:hover { border-color: var(--accent); }
+  .controls button.primary { background: #1f6feb; border-color: #1f6feb; }
+  .controls button.pressed { background: #e3b341; border-color: #e3b341; color: #111; }
+  .controls label { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 6px; }
+  input[type=range] { width: 100px; accent-color: var(--accent); }
+  .stats { display: flex; gap: 8px; }
+  .stat {
+    text-align: center; min-width: 54px; background: var(--panel2);
+    border: 1px solid var(--border); border-radius: 8px; padding: 2px 7px;
+  }
+  .stat .v { font-size: 17px; font-weight: 700; color: #7ee2ff; line-height: 1.2; }
+  .stat .l { font-size: 10px; color: var(--muted); }
+
+  /* ===== 主体：平铺栅格 ===== */
+  main {
+    flex: 1; display: grid;
+    grid-template-columns: repeat(12, 1fr);
+    grid-template-rows: 0.9fr 1.6fr;
+    gap: 8px; padding: 8px; min-height: 0;
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; display: flex; flex-direction: column; min-height: 0; min-width: 0;
+  }
+  .card .card-title {
+    padding: 5px 12px; font-size: 12px; font-weight: 600; color: #9fb3cc;
+    border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px;
+    flex: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .card .card-title .sub { color: var(--muted); font-weight: 400; font-size: 11px; }
+  .card .card-body { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; }
+  /* 热图卡片：card-body 变 flex 容器 → heat-wrap 获得确定可视高度，超高时可滚动 */
+  #heat-card > .card-body { display: flex; flex-direction: column; }
+
+  /* 各卡片栅格占位 */
+  #game-card { grid-column: span 3; }
+  #input-card { grid-column: span 3; }
+  #output-card { grid-column: span 2; }
+  #topo-card { grid-column: span 4; }
+  #heat-card { grid-column: span 12; }
+
+  #game-wrap { display: flex; align-items: center; justify-content: center; padding: 5px; }
+  #gameCanvas { width: 300px; height: 300px; image-rendering: pixelated; }
+
+  /* 输入面板 */
+  #input-body { padding: 6px 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+  .io-group .g-label {
+    font-size: 11px; color: var(--muted); margin-bottom: 2px;
+    display: flex; justify-content: space-between;
+  }
+  .bar-row { display: flex; align-items: center; gap: 5px; margin-bottom: 1px; }
+  .bar-row .b-label { width: 62px; font-size: 10px; color: var(--muted); text-align: right; flex: none; }
+  .bar-track { flex: 1; height: 8px; background: #0b0f16; border-radius: 3px; position: relative; }
+  .bar-fill { position: absolute; inset: 0; border-radius: 3px; }
+  .bar-row .b-val { width: 36px; font-size: 10px; color: #9fb3cc; text-align: right; flex: none; font-variant-numeric: tabular-nums; }
+
+  /* 输出面板 */
+  #output-body { padding: 8px 10px; overflow-y: auto; }
+  .act-row { margin-bottom: 8px; }
+  .act-label { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 2px; }
+  .act-label .tag { padding: 0 6px; border-radius: 4px; font-size: 10px; }
+  .act-bar-track { height: 18px; background: #0b0f16; border-radius: 4px; position: relative; border: 1px solid transparent; }
+  .act-bar-track.active { border-color: #ffd33d; box-shadow: 0 0 6px #ffd33d55; }
+  .act-fill { position: absolute; top: 0; bottom: 0; border-radius: 3px; }
+  .fatigue-row { font-size: 11px; color: var(--muted); margin-top: 8px; line-height: 1.7; }
+  .fatigue-row b { color: #ffa657; }
+  .legend-note { font-size: 10px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
+
+  /* 热力图 tab 子选项 */
+  #heat-tabs {
+    display: flex; gap: 5px; padding: 5px 10px; border-bottom: 1px solid var(--border);
+    flex-wrap: wrap; flex: none; align-items: center;
+  }
+  #heat-tabs .ht-label { font-size: 11px; color: var(--muted); margin-right: 2px; }
+  #heat-tabs button {
+    background: var(--panel2); color: var(--muted); border: 1px solid var(--border);
+    border-radius: 14px; padding: 2px 10px; font-size: 11px; cursor: pointer;
+    font-family: inherit; transition: all .15s;
+  }
+  #heat-tabs button:hover { color: var(--text); border-color: var(--accent); }
+  #heat-tabs button.active { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+  #heat-wrap { flex: 1; min-height: 0; position: relative; display: flex; flex-direction: column; overflow-y: auto; }
+  #heatCanvas { display: block; width: 100%; flex: none; }
+  #heat-note { font-size: 10px; color: var(--muted); padding: 2px 10px; border-top: 1px solid var(--border); flex: none; }
+  #heat-tabs .ht-ctl {
+    display: flex; align-items: center; gap: 4px;
+    color: var(--muted); font-size: 11px; margin-left: 10px; flex: none;
+  }
+  #heat-tabs .ht-ctl input[type=range] { width: 72px; }
+  #heat-tabs .ht-ctl span { width: 34px; font-variant-numeric: tabular-nums; }
+
+  #game-status {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 15px; color: #e3b341; background: #00000088;
+    border-radius: 0 0 10px 10px; pointer-events: none;
+    opacity: 0; transition: opacity .25s; z-index: 5;
+  }
+  #game-status.show { opacity: 1; }
+
+  /* 底部状态栏 */
+  footer {
+    flex: none; display: flex; align-items: center; gap: 14px;
+    padding: 4px 16px; font-size: 12px; color: var(--muted);
+    background: #141a24; border-top: 1px solid var(--border);
+  }
+  #conn-dot {
+    width: 10px; height: 10px; border-radius: 50%; background: #f85149;
+    display: inline-block; flex: none;
+  }
+  #conn-dot.connected { background: #3fb950; }
+  #conn-dot.reconnecting { background: #e3b341; }
+  #conn-text { flex: none; }
+  #hint { flex: 1; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>🧠 E-I 皮质柱脑 · 贪吃蛇实时可视化 <small>test5a</small></h1>
+    <div class="chip">模型 <b id="m-model">-</b></div>
+    <div class="chip">柱体 <b id="m-n">-</b></div>
+    <div class="chip">K帧思考 <b id="m-k">-</b></div>
+    <div class="chip">训练战绩 <b id="m-food">-</b> / <b id="m-steps">-</b> 步</div>
+    <div class="controls">
+      <label>模型
+        <select id="modelSelect">
+          <option value="5a">5a 最优 (256)</option>
+          <option value="fast">5d 最优 (256)</option>
+        </select>
+      </label>
+      <button id="btnNew" class="primary">🔄 重新开始</button>
+      <button id="btnPause">⏸ 暂停</button>
+      <label>速度 <input type="range" id="speedSlider" min="0.5" max="4" step="0.5" value="1"></label>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="v" id="st-score">0</div><div class="l">得分</div></div>
+      <div class="stat"><div class="v" id="st-steps">0</div><div class="l">步数</div></div>
+      <div class="stat"><div class="v" id="st-ep">0</div><div class="l">局数</div></div>
+    </div>
+  </header>
+
+  <main>
+    <!-- 行1：游戏盘 | 输入 | 输出 | 拓扑 -->
+    <div class="card" id="game-card">
+      <div class="card-title">① 游戏盘 <span class="sub">最优模型实际游玩</span></div>
+      <div class="card-body">
+        <div id="game-wrap">
+          <canvas id="gameCanvas" width="300" height="300"></canvas>
+          <div id="game-status">本局结束 · 自动开始新局</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="input-card">
+      <div class="card-title">③ 实时输入观测 <span class="sub">24 维</span></div>
+      <div id="input-body">
+        <div class="io-group">
+          <div class="g-label"><span>食物方向</span><span id="g-fdir" style="color:#3fb950">--</span></div>
+          <div id="bars-fdir"></div>
+        </div>
+        <div class="io-group">
+          <div class="g-label"><span>食物距离</span><span id="g-fdist" style="color:#f0883e">--</span></div>
+          <div id="bars-fdist"></div>
+        </div>
+        <div class="io-group">
+          <div class="g-label"><span>射线视野 5×(路径, 食物)</span></div>
+          <div id="bars-ray"></div>
+        </div>
+        <div class="io-group">
+          <div class="g-label"><span>自体感知 8 桶</span></div>
+          <div id="bars-self"></div>
+        </div>
+        <div class="io-group">
+          <div class="g-label"><span>蛇尾局部坐标</span></div>
+          <div id="bars-tail"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="output-card">
+      <div class="card-title">⑤ 动作输出</div>
+      <div id="output-body">
+        <div class="g-label">动作潜力 (K帧平均 logits − 疲劳)</div>
+        <div id="act-bars"></div>
+        <div class="fatigue-row">疲劳：Fwd <b id="f-0">0</b> · Left <b id="f-1">0</b> · Right <b id="f-2">0</b></div>
+        <div class="g-label" style="margin-top:6px">当前动作</div>
+        <div id="cur-act" style="font-size:14px; font-weight:700; color:#7ee2ff">—</div>
+        <div class="legend-note">红=兴奋 logit，蓝=抑制。<br>高亮=当前选择动作；黑星/绿虚线见时序图。</div>
+      </div>
+    </div>
+
+    <div class="card" id="topo-card">
+      <div class="card-title">② 拓扑网络实时状态 <span class="sub">In·24 → 柱(色=τ_e·亮=活动E) → Out·3</span></div>
+      <div class="card-body"><canvas id="topoCanvas"></canvas></div>
+    </div>
+
+    <!-- 行2：实时热力图监控（tab 子选项切换，独占整卡高度以便看清） -->
+    <div class="card" id="heat-card">
+      <div class="card-title">④⑥ 实时热力图监控 <span class="sub">最近 150 步 · 点击下方子选项独占查看</span></div>
+      <div id="heat-tabs">
+        <span class="ht-label">子选项:</span>
+        <button data-heat="obs" class="active">输入观测 24 行</button>
+        <button data-heat="E">柱活动 E</button>
+        <button data-heat="tau">有效 τ_eff</button>
+        <button data-heat="ex">兴奋激素</button>
+        <button data-heat="inh">抑制激素</button>
+        <button data-heat="logits">输出 logits 折线</button>
+        <label class="ht-ctl">热图行高
+          <input type="range" id="heatHeightSlider" min="1" max="12" step="1" value="4">
+          <span id="heatHVal">4px</span>
+        </label>
+      </div>
+      <div class="card-body">
+        <div id="heat-wrap">
+          <canvas id="heatCanvas"></canvas>
+        </div>
+      </div>
+      <div id="heat-note">★=实际动作 · 绿虚线=动作切换 · 白横线=社区边界（E/τ/激素视图）</div>
+    </div>
+  </main>
+
+  <footer>
+    <span id="conn-dot"></span>
+    <span id="conn-text">连接中…</span>
+    <span id="hint"></span>
+  </footer>
+</div>
+
+<script src="visualizer.js"></script>
+</body>
+</html>

@@ -9,9 +9,14 @@
 仅做评估阶段计时（含多进程建池/序列化分发），不包含进化演化。
 """
 import os
+import sys
 import time
 import random
 import torch
+
+EXPERIMENTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'experiments')
+if EXPERIMENTS not in sys.path:
+    sys.path.insert(0, EXPERIMENTS)
 
 import test5_fast as M
 
