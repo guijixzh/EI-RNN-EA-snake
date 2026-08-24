@@ -34,6 +34,17 @@ def _obs_sees_food(obs):
     return np.any(o[:, 5:14:2] > 0.0, axis=1)
 
 
+def ray_obs_sees_food(obs):
+    """判断『RaySnakeEnv』观测是否看到食物（8 扇区食物块 [8:16]）。
+
+    批量版本：传入 [B, 32] 数组时返回 [B] 布尔向量。
+    """
+    o = np.asarray(obs)
+    if o.ndim == 1:
+        return bool(np.any(o[8:16] > 0.0))
+    return np.any(o[:, 8:16] > 0.0, axis=1)
+
+
 class SnakeEnv:
     def __init__(self, grid_size=10, max_steps=500, cfg=None):
         self.grid_size = grid_size
@@ -194,3 +205,128 @@ class SnakeEnv:
             return self._get_obs(), ate_food, False, True
 
         return self._get_obs(), ate_food, False, False
+
+
+# ==================== RaySnakeEnv：32 维头朝向相对 8 方向观测 ====================
+
+# 绝对 4 基本方向 one-hot 编码（与 BatchedRaySnakeEnv 共享）
+RAY_DIRS_ABS = [(0, 1), (1, 0), (0, -1), (-1, 0)]          # 0:右 1:下 2:左 3:上
+RAY_DIR_IDX = {d: i for i, d in enumerate(RAY_DIRS_ABS)}
+
+
+def _ray_8_dirs(head_dir):
+    """由蛇首朝向 (dr, dc) 派生 8 个头部相对方向向量。
+
+    顺序（相对蛇首逆时针）：[前, 左前, 左, 左后, 后, 右后, 右, 右前]。
+    """
+    dr, dc = head_dir
+    left = (-dc, dr)
+    right = (dc, -dr)
+    return [
+        (dr, dc),              # 0 前
+        (dr - dc, dc + dr),    # 1 左前
+        (-dc, dr),             # 2 左
+        (-dr - dc, -dc + dr),  # 3 左后
+        (-dr, -dc),            # 4 后
+        (-dr + dc, -dc - dr),  # 5 右后
+        (dc, -dr),             # 6 右
+        (dr + dc, dc - dr),    # 7 右前
+    ]
+
+
+def _ray_sector(d8, vr, vc):
+    """相对向量 (vr, vc) 落入的扇区索引（0..7）。
+
+    按『相对蛇首朝向的旋转角』量化到 45° 扇区，边界点由 round 确定性判定
+    （避免 dot 最近方向在 45° 边界上的平局歧义，如颈节恒在正后方）。
+    """
+    if vr == 0 and vc == 0:
+        return 0
+    hdr, hdc = d8[0]                                   # 蛇首朝向（前）
+    rel = math.atan2(vc, vr) - math.atan2(hdc, hdr)
+    rel_deg = math.degrees(rel) % 360.0
+    return int(round(rel_deg / 45.0)) % 8
+
+
+class RaySnakeEnv(SnakeEnv):
+    """32 维头朝向相对 8 方向射线观测贪吃蛇。
+
+    观测布局 [0:32]：
+        [0:4]    蛇首方向 one-hot（绝对 4 基本方向）
+        [4:8]    蛇尾方向 one-hot（蛇末节移动朝向，绝对 4 基本方向）
+        [8:16]   食物 8 扇区距离倒数（沿头部相对 8 方向射线扫描食物距离）
+        [16:24]  自身 8 扇区距离倒数（沿头部相对 8 方向射线扫描最近身体节距离）
+        [24:32]  8 方向障碍距离倒数；其中 [28]（后）约定为 sqrt(蛇身长度/格子度)。
+
+    食物/自身扇区改为连续距离倒数（1/dist），保留方向信息的同时提供距离梯度。
+    """
+
+    def __init__(self, grid_size=10, max_steps=500, cfg=None):
+        super().__init__(grid_size, max_steps, cfg)
+        self.obs_dim = 32
+
+    def sees_food(self, obs):
+        return ray_obs_sees_food(obs)
+
+    def _get_obs(self, will_eat=False):
+        obs = np.zeros(32, dtype=np.float32)
+        head = self.head
+        d = self.dir
+
+        # --- [0:4] 蛇首方向 one-hot ---
+        obs[RAY_DIR_IDX[d]] = 1.0
+
+        # --- [4:8] 蛇尾方向 one-hot（末节移动朝向：从蛇尾指向其前一节）---
+        tail = self.body[-1]
+        prev = self.body[-2]
+        td = (prev[0] - tail[0], prev[1] - tail[1])
+        obs[4 + RAY_DIR_IDX[td]] = 1.0
+
+        d8 = _ray_8_dirs(d)
+
+        # --- [8:16] 食物 8 扇区距离倒数 ---
+        for i, (dx, dy) in enumerate(d8):
+            dist = self.grid_size + 1
+            for step in range(1, self.grid_size + 1):
+                r = head[0] + dx * step
+                c = head[1] + dy * step
+                if r < 0 or r >= self.grid_size or c < 0 or c >= self.grid_size:
+                    break
+                if (r, c) == self.food:
+                    dist = step
+                    break
+            obs[8 + i] = 1.0 / dist if dist <= self.grid_size else 0.0
+
+        # --- [16:24] 自身 8 扇区距离倒数 ---
+        body_set = set(self.body[1:])
+        for i, (dx, dy) in enumerate(d8):
+            dist = self.grid_size + 1
+            for step in range(1, self.grid_size + 1):
+                r = head[0] + dx * step
+                c = head[1] + dy * step
+                if r < 0 or r >= self.grid_size or c < 0 or c >= self.grid_size:
+                    break
+                if (r, c) in body_set:
+                    dist = step
+                    break
+            obs[16 + i] = 1.0 / dist if dist <= self.grid_size else 0.0
+
+        # --- [24:32] 障碍距离倒数（8 方向射线）---
+        body_set = set(self.body[1:])
+        for i, (dx, dy) in enumerate(d8):
+            dist = self.grid_size
+            for step in range(1, self.grid_size + 1):
+                r = head[0] + dx * step
+                c = head[1] + dy * step
+                if r < 0 or r >= self.grid_size or c < 0 or c >= self.grid_size:
+                    dist = step
+                    break
+                if (r, c) in body_set:
+                    dist = step
+                    break
+            obs[24 + i] = 1.0 / dist
+
+        # 身后约定：障碍数 = sqrt(蛇身长度/阶数)
+        obs[24 + 4] = np.sqrt(len(self.body)/self.grid_size)
+
+        return obs

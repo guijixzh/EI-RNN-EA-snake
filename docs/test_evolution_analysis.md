@@ -20,9 +20,10 @@ test1 (LSTM预训练)
                        │     ├→ test5a_lunar (LunarLander移植)
                        │     ├→ test5b (CNN前端, 失败)
                        │     └→ test5c (CNN前端, 失败)
-                       └→ test5d v2 (三元组筛选+单柱激素门控+动态变异) ── ★最优进化版
-                            ├→ test6 (PPO梯度训练, 替代进化)
-                            └→ test7 (GPU全向量化进化, 去激素)
+                        └→ test5d v2 (三元组筛选+单柱激素门控+动态变异) ── ★最优进化版
+                             ├→ test6 (PPO梯度训练, 替代进化)
+                             └→ test7 (GPU全向量化进化, 去激素)
+test8 (真正 NEAT × EI-RNN, 32 维 8 方向观测) ── 契合度验证
 ```
 
 - **★ 核心结论**：经过多轮验证有效的 EI-RNN 基础架构，最终沉淀在 `test5d`（CPU 进化）、`test6`（PPO）、`test7`（GPU 进化）三套实现中，三者共用同一套 E-I 动力学。该基础架构已被抽离为 `einbrain/` 整合通用包。
@@ -77,6 +78,7 @@ test1 (LSTM预训练)
 | `test5d.py` | **最优进化版 v2**：(1) 进化筛选改为三元组 `(food, seen, unseen)`，25 分前后切换排序压力（低分保"看见秒吃"，高分保"看不见活得久"，防长蛇追食自杀）；(2) 激素网络默认不训练 + **单柱释放门控**；(3) 动态变异（拓扑余弦退火 + 动力学指数衰减） | **当前最佳、验证最充分的 CPU 进化版 EI-RNN**，被 test6/test7 用作种子模型。 |
 | `test6.py` | **PPO 强化学习**：同一脑结构改为可微 `forward_ppo`/`forward_ppo_k`（显式状态 + 截断 BPTT），新增 value head `V/b_v`；16 向量化环境替代 2048 个体种群；seen/unseen 每步奖励 + 空转/饥饿惩罚 | 从"进化"切换为"梯度 RL"范式，信息利用率提升数个量级。 |
 | `test7.py` | **GPU 全并行进化**：`GeneStack` 把整个种群堆叠为 `[POP,N,N]` 批量张量，交叉/变异全向量化；`BatchedSnakeEnv` 批量并行游戏；**彻底移除激素支路**（与 test5d 零激素动力学一致）；显存自适应分块 | 将进化训练速度提升至全 GPU 级别。 |
+| `test8.py` | **真正 NEAT × EI-RNN 契合度验证**：完整 NEAT（全局创新号 + 物种化/相容性距离 + 历史标记交叉 + add-connection/add-node 结构生长）驱动 EI-RNN（256 柱 `INIT_DENSITY=0.15` 启动）；环境改用新 **32 维头朝向相对 8 方向观测**（蛇首方向 4 + 蛇尾末节移动朝向 4 + 食物/自身 8 扇区 + 障碍距离倒数 8，身后槽=sqrt(蛇身长度/格子度)），K=5；GPU 批量评估（`BatchedRaySnakeEnv`） | 验证 NEAT 的物种化/创新号机制与 EI-RNN 稀疏柱架构的契合度：物种数随自适应阈值收敛、拓扑单调生长、BestFood 随代提升。`einbrain.neat` 为可复用引擎。 |
 
 ### 2.7 基础设施 / 工具
 

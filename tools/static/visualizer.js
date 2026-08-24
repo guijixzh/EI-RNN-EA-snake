@@ -77,6 +77,30 @@ function protocolError() {
 const RAY_NAMES = ["左", "左前", "前", "右前", "右"];
 const SELF_NAMES = ["前", "左前", "左", "左后", "后", "右后", "右", "右前"];
 
+// test7a 32proj 观测通道（头/尾方向 one-hot ×4，食物 8 扇区投影，自体 8 扇区，障碍 8 扇区）
+const OBS32_LABELS = [
+  "头·右", "头·下", "头·左", "头·上",
+  "尾·右", "尾·下", "尾·左", "尾·上",
+  "食·前", "食·左前", "食·左", "食·左后", "食·后", "食·右后", "食·右", "食·右前",
+  "身·前", "身·左前", "身·左", "身·左后", "身·后", "身·右后", "身·右", "身·右前",
+  "障·前", "障·左前", "障·左", "障·左后", "障·后·√(len/G)", "障·右后", "障·右", "障·右前",
+];
+const OBS32_GROUPS = [
+  { name: "蛇头方向 one-hot", from: 0, to: 4, color: "#3fb950" },
+  { name: "蛇尾方向 one-hot", from: 4, to: 8, color: "#3fe0c8" },
+  { name: "食物 8 扇区投影 (×8)", from: 8, to: 16, color: "#ffd23d" },
+  { name: "自体 8 扇区 (×8)", from: 16, to: 24, color: "#d07ff5" },
+  { name: "障碍 8 扇区 (×8)", from: 24, to: 32, color: "#4aa8ff" },
+];
+// 32proj 中 8..32 通道含 ×8 幅度缩放，条形显示按 /8 归一
+const obs32Norm = (r) => (r >= 8 ? v => v / 8 : v => v);
+const obs32ColorOf = (r) => {
+  for (const g of OBS32_GROUPS) if (r >= g.from && r < g.to) return g.color;
+  return "#8b98ab";
+};
+const hexRgb = (hex) => [
+  parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16)];
+
 function makeBarRow(container, label, idPrefix) {
   const row = document.createElement("div");
   row.className = "bar-row";
@@ -88,24 +112,55 @@ function makeBarRow(container, label, idPrefix) {
 }
 
 function buildIOPanels() {
-  const cF = $("bars-fdir"), cR = $("bars-ray"), cS = $("bars-self"),
-        cT = $("bars-tail"), cD = $("bars-fdist"), cA = $("act-bars");
-  S.barsF = [];
-  S.barsF.push(makeBarRow(cF, "前方", "if0"));
-  S.barsF.push(makeBarRow(cF, "左前", "if1"));
-  S.barsF.push(makeBarRow(cF, "右前", "if2"));
-  S.barsDist = makeBarRow(cD, "欧氏距离", "if3");
-  S.barsR = [];
-  for (let i = 0; i < 5; i++) {
-    S.barsR.push(makeBarRow(cR, RAY_NAMES[i] + " 路径", "ir" + i + "p"));
-    S.barsR.push(makeBarRow(cR, RAY_NAMES[i] + " 食物", "ir" + i + "f"));
+  // 24 维（test5a 射线观测）专用面板：仅在 OBS==24 模式下构建
+  if (S.obsMode !== 32) {
+    const cF = $("bars-fdir"), cR = $("bars-ray"), cS = $("bars-self"),
+          cT = $("bars-tail"), cD = $("bars-fdist");
+    S.barsF = [];
+    S.barsF.push(makeBarRow(cF, "前方", "if0"));
+    S.barsF.push(makeBarRow(cF, "左前", "if1"));
+    S.barsF.push(makeBarRow(cF, "右前", "if2"));
+    S.barsDist = makeBarRow(cD, "欧氏距离", "if3");
+    S.barsR = [];
+    for (let i = 0; i < 5; i++) {
+      S.barsR.push(makeBarRow(cR, RAY_NAMES[i] + " 路径", "ir" + i + "p"));
+      S.barsR.push(makeBarRow(cR, RAY_NAMES[i] + " 食物", "ir" + i + "f"));
+    }
+    S.barsS = [];
+    for (let i = 0; i < 8; i++) S.barsS.push(makeBarRow(cS, SELF_NAMES[i], "is" + i));
+    S.barsT = [];
+    S.barsT.push(makeBarRow(cT, "尾·前向", "it0"));
+    S.barsT.push(makeBarRow(cT, "尾·左向", "it1"));
+    buildActBars();
+    return;
   }
-  S.barsS = [];
-  for (let i = 0; i < 8; i++) S.barsS.push(makeBarRow(cS, SELF_NAMES[i], "is" + i));
-  S.barsT = [];
-  S.barsT.push(makeBarRow(cT, "尾·前向", "it0"));
-  S.barsT.push(makeBarRow(cT, "尾·左向", "it1"));
-  // 动作条
+  // 32 维（test7a 32proj 观测）：隐藏旧 24 维分组，生成通用分组条形
+  const body = $("input-body");
+  for (const el of body.querySelectorAll(".io-group")) el.style.display = "none";
+  let g = $("io-generic32");
+  if (g) g.remove();
+  g = document.createElement("div");
+  g.className = "io-group";
+  g.id = "io-generic32";
+  body.appendChild(g);
+  S.bars32 = [];
+  for (const grp of OBS32_GROUPS) {
+    const grpDiv = document.createElement("div");
+    grpDiv.innerHTML = `<div class="g-label"><span>${grp.name}</span></div>`;
+    const barsDiv = document.createElement("div");
+    grpDiv.appendChild(barsDiv);
+    g.appendChild(grpDiv);
+    for (let i = grp.from; i < grp.to; i++) {
+      S.bars32.push(makeBarRow(barsDiv, OBS32_LABELS[i], "i32_" + i));
+    }
+  }
+  buildActBars();
+}
+
+function buildActBars() {
+  // 动作条（两种模式共用；独立出来避免重复构建）
+  const cA = $("act-bars");
+  if (cA.children.length) return;
   S.actBars = [];
   const actNames = ["前进 Fwd", "左转 Left", "右转 Right"];
   for (let i = 0; i < 3; i++) {
@@ -135,7 +190,7 @@ function resizeHeatCanvas() {
   const dpr = window.devicePixelRatio || 1;
   const wrapW = wrap.clientWidth, wrapH = wrap.clientHeight;
   if (wrapW <= 0 || wrapH <= 0) return;
-  const rows = S.heatTab === "obs" ? 24
+  const rows = S.heatTab === "obs" ? (S.meta ? S.meta.OBS : 24)
              : (S.heatTab === "logits" ? null : (S.meta ? S.meta.N : 256));
   let pxH;
   if (rows === null) pxH = wrapH;                         // logits 撑满可视
@@ -180,6 +235,7 @@ function rayDirsFromDir(dir) {
 
 function drawVision(ctx, fr, G, cell) {
   if (!fr || !fr.obs) return;
+  if (S.obsMode === 32) return;   // 5 射线视线仅适用于 24 维射线观测模式
   const [dy, dx] = fr.dir;
   const hx = (fr.body[0][1] + .5) * cell;
   const hy = (fr.body[0][0] + .5) * cell;
@@ -277,28 +333,37 @@ function drawGame() {
 /* ---------------- 输入/输出面板更新 ---------------- */
 function drawIO() {
   const fr = S.cur;
-  const obs = fr ? fr.obs : new Array(24).fill(0);
-  const colorMap = { f: "#3fb950", d: "#f0883e", rp: "#4aa8ff", rf: "#ffd23d", s: "#d07ff5", t: "#3fe0c8" };
-  for (let i = 0; i < 3; i++) styleFill(S.barsF[i].fill, colorMap.f, obs[i]);
-  styleFill(S.barsDist.fill, colorMap.d, obs[3]);
-  for (let i = 0; i < 5; i++) {
-    styleFill(S.barsR[i * 2].fill, colorMap.rp, obs[4 + i * 2]);
-    styleFill(S.barsR[i * 2 + 1].fill, colorMap.rf, obs[4 + i * 2 + 1]);
-  }
-  for (let i = 0; i < 8; i++) styleFill(S.barsS[i].fill, colorMap.s, obs[14 + i]);
-  styleFill(S.barsT[0].fill, colorMap.t, Math.abs(obs[22]) * 2);
-  styleFill(S.barsT[1].fill, colorMap.t, Math.abs(obs[23]) * 2);
-  const valEls = [
-    S.barsF[0].val, S.barsF[1].val, S.barsF[2].val, S.barsDist.val,
-    ...S.barsR.map(b => b.val), ...S.barsS.map(b => b.val), ...S.barsT.map(b => b.val),
-  ];
-  for (let i = 0; i < 24; i++) valEls[i].textContent = obs[i].toFixed(2);
-  if (fr) {
-    const fd = [obs[0], obs[1], obs[2]];
-    const dirs = ["前方", "左前", "右前"];
-    const hits = dirs.filter((_, k) => fd[k] > 0);
-    $("g-fdir").textContent = hits.length ? hits.join("/") : "无";
-    $("g-fdist").textContent = (obs[3] * S.meta.GRID * Math.SQRT2).toFixed(1) + " 格";
+  // 32proj 模式：通用分组条形（8..32 通道 ×8 幅度，按 /8 归一显示）
+  if (S.obsMode === 32) {
+    const obs = fr ? fr.obs : new Array(32).fill(0);
+    for (let i = 0; i < 32; i++) {
+      styleFill(S.bars32[i].fill, obs32ColorOf(i), obs32Norm(i)(obs[i]));
+      S.bars32[i].val.textContent = obs[i].toFixed(2);
+    }
+  } else {
+    const obs = fr ? fr.obs : new Array(24).fill(0);
+    const colorMap = { f: "#3fb950", d: "#f0883e", rp: "#4aa8ff", rf: "#ffd23d", s: "#d07ff5", t: "#3fe0c8" };
+    for (let i = 0; i < 3; i++) styleFill(S.barsF[i].fill, colorMap.f, obs[i]);
+    styleFill(S.barsDist.fill, colorMap.d, obs[3]);
+    for (let i = 0; i < 5; i++) {
+      styleFill(S.barsR[i * 2].fill, colorMap.rp, obs[4 + i * 2]);
+      styleFill(S.barsR[i * 2 + 1].fill, colorMap.rf, obs[4 + i * 2 + 1]);
+    }
+    for (let i = 0; i < 8; i++) styleFill(S.barsS[i].fill, colorMap.s, obs[14 + i]);
+    styleFill(S.barsT[0].fill, colorMap.t, Math.abs(obs[22]) * 2);
+    styleFill(S.barsT[1].fill, colorMap.t, Math.abs(obs[23]) * 2);
+    const valEls = [
+      S.barsF[0].val, S.barsF[1].val, S.barsF[2].val, S.barsDist.val,
+      ...S.barsR.map(b => b.val), ...S.barsS.map(b => b.val), ...S.barsT.map(b => b.val),
+    ];
+    for (let i = 0; i < 24; i++) valEls[i].textContent = obs[i].toFixed(2);
+    if (fr) {
+      const fd = [obs[0], obs[1], obs[2]];
+      const dirs = ["前方", "左前", "右前"];
+      const hits = dirs.filter((_, k) => fd[k] > 0);
+      $("g-fdir").textContent = hits.length ? hits.join("/") : "无";
+      $("g-fdist").textContent = (obs[3] * S.meta.GRID * Math.SQRT2).toFixed(1) + " 格";
+    }
   }
   if (fr) {
     for (let i = 0; i < 3; i++) {
@@ -373,7 +438,7 @@ function prepareTopoLayout() {
     sctx.fillStyle = commColors[c.color % commColors.length];
     sctx.fillText("C" + c.id, ax, ay - 14);
   }
-  const obsLabels = ["食·前", "食·左前", "食·右前", "食·距离",
+  const obsLabels = S.obsMode === 32 ? OBS32_LABELS : ["食·前", "食·左前", "食·右前", "食·距离",
     "射·左·径", "射·左·食", "射·左前·径", "射·左前·食", "射·前·径", "射·前·食",
     "射·右前·径", "射·右前·食", "射·右·径", "射·右·食",
     "身·前", "身·左前", "身·左", "身·左后", "身·后", "身·右后", "身·右", "身·右前",
@@ -554,9 +619,10 @@ function drawHeat() {
 
     // ---- 输入观测视图 ----
   if (S.heatTab === "obs") {
-    const rows = 24;
+    const rows = S.meta ? S.meta.OBS : 24;
+    const mode32 = S.obsMode === 32;
     const rowH = H / rows;
-    const lines = [0, 3, 4, 14, 22].map(v => (v + 0.5) * rowH);
+    const lines = (mode32 ? [0, 4, 8, 16, 24] : [0, 3, 4, 14, 22]).map(v => (v + 0.5) * rowH);
     const img = ctx.createImageData(W, H);
     const d = img.data;
     for (let p = 0; p < W * H; p++) { d[p * 4] = 13; d[p * 4 + 1] = 17; d[p * 4 + 2] = 23; d[p * 4 + 3] = 255; }
@@ -569,8 +635,9 @@ function drawHeat() {
       for (let r = 0; r < rows; r++) {
         const y0 = Math.round(r * rowH);
         const y1 = Math.round((r + 1) * rowH);
-        const rgb = obsRowColorOf(r);
-        const v = Math.max(0, Math.min(1, obs[r]));
+        const rgb = mode32 ? hexRgb(obs32ColorOf(r)) : obsRowColorOf(r);
+        const v0 = Math.max(0, Math.min(1, obs[r]));
+        const v = mode32 ? obs32Norm(r)(v0) : v0;
         const col = [rgb[0] * (0.12 + 0.88 * v), rgb[1] * (0.12 + 0.88 * v), rgb[2] * (0.12 + 0.88 * v)];
         for (let yy = y0; yy < y1; yy++) {
           for (let px = px0; px < px1; px++) {
@@ -586,9 +653,9 @@ function drawHeat() {
     for (const y of lines) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
     ctx.font = "9px Consolas, monospace"; ctx.textAlign = "right";
     if (rowH > 14) {
-      for (let r = 0; r < 24; r++) {
+      for (let r = 0; r < rows; r++) {
         ctx.fillStyle = "#aebccd";
-        ctx.fillText(OBS_ROW_LABELS[r], W - 4, (r + 0.35) * rowH + 8);
+        ctx.fillText(mode32 ? OBS32_LABELS[r] : OBS_ROW_LABELS[r], W - 4, (r + 0.35) * rowH + 8);
       }
     }
     // 动作切换绿虚线 + 动作星标
@@ -795,6 +862,27 @@ function handleInit(msg) {
   S.meta = msg.meta;
   S.order = msg.layout.col_order;
   S.episode = msg.episode;
+  S.obsMode = msg.meta.OBS === 24 ? 24 : 32;
+
+  // 模型下拉框：用后端枚举的模型列表重建，并选中当前模型
+  const sel = $("modelSelect");
+  if (msg.models && msg.models.length) {
+    sel.innerHTML = "";
+    for (const [k, label] of msg.models) {
+      const o = document.createElement("option");
+      o.value = k;
+      o.textContent = label;
+      sel.appendChild(o);
+    }
+  }
+  const wantKey = S.urlModel || msg.meta.model_key;
+  if (wantKey && [...sel.options].some(o => o.value === wantKey)) sel.value = wantKey;
+
+  // 面板文案随观测维度自适应
+  $("input-sub").textContent = msg.meta.OBS + " 维";
+  const hto = $("heatTabObs");
+  if (hto) hto.textContent = "输入观测 " + msg.meta.OBS + " 行";
+  buildIOPanels();
   S.commBd = [];
   let acc = 0;
   for (const c of msg.layout.communities) {
@@ -908,10 +996,10 @@ window.addEventListener("DOMContentLoaded", () => {
         protocolError();
       });
   };
-  // URL 预选模型（兼容旧值 64/256 → 5a）
+  // URL 预选模型（兼容旧值 64/256 → 5a；init 到达后再真正选中）
   const m = new URLSearchParams(location.search).get("model");
-  if (m === "fast") $("modelSelect").value = "fast";
-  else if (m === "64" || m === "256") $("modelSelect").value = "5a";
+  if (m === "64" || m === "256") S.urlModel = "5a";
+  else if (m) S.urlModel = m;
 
   // 窗口尺寸变化 → 重设画布
   let resizeTimer = null;
