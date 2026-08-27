@@ -11,8 +11,15 @@ const S = {
   layout: null, meta: null,
   paused: false, speed: 1,
   histObs: [], histE: [], histTau: [], histEx: [], histInH: [], histLogits: [],
-  histActions: [], histSwitch: [],
+  histActions: [], histSwitch: [], histAte: [],
   histLen: 0,
+  // ---- 神经分析面板状态 ----
+  fcMatrix: null, fcCnt: 0, fcMode: "abs",     // ⑦ FC
+  rasMean: null, rasVar: null, rasLast: null,  // ⑨ 栅格 EMA 基线
+  rasGrid: [], rasK: 2.0,
+  pcaBasis: null, pcaMean: null, pcVar: [0, 0, 0], pcaCnt: 0,  // ⑩ PCA
+  spring: null,                                 // ⑧ 3D 弹簧
+  phaseView: { yaw: 0.6, pitch: 0.35, zoom: 1, drag: null },
   cur: null,
   episode: 0,
   topoStatic: null,
@@ -204,7 +211,8 @@ function resizeHeatCanvas() {
 function resizeCanvases() {
   const dpr = window.devicePixelRatio || 1;
   // game / topo 画布：按容器撑满
-  for (const id of ["gameCanvas", "topoCanvas"]) {
+  for (const id of ["gameCanvas", "topoCanvas", "fcCanvas", "springCanvas",
+                    "rasterCanvas", "phaseCanvas"]) {
     const cv = $(id);
     if (!cv) continue;
     const rect = cv.getBoundingClientRect();
@@ -798,12 +806,44 @@ function pushFrame(fr) {
   S.histActions.push(fr.action);
   const prevA = S.histActions[S.histLen - 2];
   S.histSwitch.push(prevA !== undefined && prevA !== fr.action);
+  S.histAte.push(fr.score > (S.histScore || 0));
+  S.histScore = fr.score;
+  updateRaster(E);
   if (S.histObs.length > MAX_HIST) {
     S.histObs.shift(); S.histE.shift(); S.histTau.shift();
     S.histEx.shift(); S.histInH.shift(); S.histLogits.shift();
-    S.histActions.shift(); S.histSwitch.shift();
+    S.histActions.shift(); S.histSwitch.shift(); S.histAte.shift();
   }
   S.histLen = S.histObs.length;
+}
+
+/* ---------------- ⑨ 栅格发放检测（E 活动自适应阈值化） ---------------- */
+function updateRaster(E) {
+  const N = S.meta.N;
+  if (!S.rasMean) {
+    S.rasMean = new Float64Array(N);
+    S.rasVar = new Float64Array(N);
+    S.rasLast = new Int16Array(N).fill(-99);
+    S.rasStep = 0;
+  }
+  const fired = new Uint8Array(N);
+  const a = 0.05;   // EMA 平滑系数（窗口 ≈ 1/α = 20 步）
+  for (let i = 0; i < N; i++) {
+    const x = E[i];
+    const d = x - S.rasMean[i];
+    S.rasMean[i] += a * d;
+    S.rasVar[i] += a * (d * d - S.rasVar[i]);
+  }
+  const step = ++S.rasStep;   // 单调步计数（环形缓冲回绕不影响不应期判断）
+  for (let i = 0; i < N; i++) {
+    const th = S.rasMean[i] + S.rasK * Math.sqrt(Math.max(0, S.rasVar[i]));
+    if (E[i] > th && (step - S.rasLast[i]) >= 3) {   // 3 步不应期
+      fired[i] = 1;
+      S.rasLast[i] = step;
+    }
+  }
+  S.rasGrid.push(fired);
+  if (S.rasGrid.length > MAX_HIST) S.rasGrid.shift();
 }
 
 /* ---------------- 主渲染循环（含连接超时看门狗） ---------------- */
@@ -819,9 +859,565 @@ function renderLoop() {
     drawGame();
     drawIO();
     drawTopo();
+    drawFC();
+    drawSpring();
+    drawRaster();
+    drawPhase();
     if (S.histLen > 0) drawHeat();
   }
   rafId = requestAnimationFrame(renderLoop);
+}
+
+/* ============================================================
+   神经分析面板（⑦FC ⑧3D弹簧 ⑨栅格 ⑩状态轨迹）
+   —— 全部纯前端计算，数据来自 SSE 帧的 E/I/logits 历史
+   ============================================================ */
+
+// 行（社区排序）→ 社区索引 & 社区色
+const COMM_COLORS = ["#f14c4c", "#2e8de6", "#35c26b", "#f0a12f", "#b05ce0",
+                     "#36c5c0", "#e06db0", "#9aa82e", "#5b7dff", "#d9a83e"];
+function buildCommOfRow() {
+  const N = S.meta.N;
+  const row2comm = new Array(N).fill(0);
+  let ci = 0;
+  for (let r = 0; r < N; r++) {
+    while (ci < S.commBd.length && r >= S.commBd[ci]) ci++;
+    row2comm[r] = ci;
+  }
+  S.commOfRow = row2comm;
+}
+
+// 双极色标：t∈[-1,1] → 蓝-黑-红
+function bipolarColor(t) {
+  if (t >= 0) return [Math.round(30 + 225 * t), Math.round(30 + 20 * t), Math.round(46 + 14 * t)];
+  const u = -t;
+  return [Math.round(30 + 20 * u), Math.round(30 + 90 * u), Math.round(46 + 209 * u)];
+}
+
+// 通用 3D 透视投影：返回屏幕坐标与深度
+function proj3(x, y, z, cx, cy, s, yaw, pitch, zoom) {
+  const cy1 = Math.cos(yaw), sy1 = Math.sin(yaw);
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  // 先绕 z 轴 yaw，再绕 x 轴 pitch
+  const x1 = x * cy1 - y * sy1;
+  const y1 = x * sy1 + y * cy1;
+  const y2 = y1 * cp - z * sp;
+  const z2 = y1 * sp + z * cp;
+  const d = 14;   // 相机距离
+  const f = (d / (d + z2)) * s * zoom;
+  return [cx + x1 * f, cy - y2 * f, z2];
+}
+
+// 拖拽旋转 + 滚轮缩放（3D 面板通用）
+function bindDrag3D(canvasId, getView, applyView) {
+  const cv = $(canvasId);
+  if (!cv) return;
+  let drag = null;
+  cv.style.cursor = "grab";
+  cv.addEventListener("pointerdown", e => {
+    drag = { x: e.clientX, y: e.clientY };
+    cv.setPointerCapture(e.pointerId);
+    cv.style.cursor = "grabbing";
+  });
+  cv.addEventListener("pointermove", e => {
+    if (!drag) return;
+    const v = getView();
+    if (!v) return;
+    applyView({
+      yaw: v.yaw - (e.clientX - drag.x) * 0.008,
+      pitch: Math.max(-1.4, Math.min(1.4, v.pitch + (e.clientY - drag.y) * 0.008)),
+      zoom: v.zoom,
+    });
+    drag = { x: e.clientX, y: e.clientY };
+  });
+  const end = () => { drag = null; cv.style.cursor = "grab"; };
+  cv.addEventListener("pointerup", end);
+  cv.addEventListener("pointercancel", end);
+  cv.addEventListener("wheel", e => {
+    e.preventDefault();
+    const v = getView();
+    if (!v) return;
+    applyView({ yaw: v.yaw, pitch: v.pitch, zoom: Math.max(0.3, Math.min(3.5, v.zoom * (e.deltaY < 0 ? 1.12 : 0.89))) });
+  }, { passive: false });
+}
+
+/* ---------------- ⑦ 功能连接性热力图 ---------------- */
+function computeFC() {
+  const N = S.meta.N, T = S.histLen;
+  if (T < 30) return;
+  // Pearson 相关：先行均值/方差，再点积
+  const mean = new Float64Array(N), varr = new Float64Array(N);
+  const inv = 1 / T;
+  for (let t = 0; t < T; t++) {
+    const E = S.histE[t];
+    for (let i = 0; i < N; i++) mean[i] += E[i] * inv;
+  }
+  for (let t = 0; t < T; t++) {
+    const E = S.histE[t];
+    for (let i = 0; i < N; i++) { const d = E[i] - mean[i]; varr[i] += d * d * inv; }
+  }
+  if (!S.fcMatrix || S.fcMatrix.length !== N * N) S.fcMatrix = new Float32Array(N * N);
+  const fc = S.fcMatrix;
+  for (let i = 0; i < N; i++) {
+    const si = Math.sqrt(varr[i]) || 1e-9;
+    for (let j = i; j < N; j++) {
+      let cov = 0;
+      for (let t = 0; t < T; t++) cov += (S.histE[t][i] - mean[i]) * (S.histE[t][j] - mean[j]);
+      cov *= inv;
+      const r = cov / (si * (Math.sqrt(varr[j]) || 1e-9));
+      fc[i * N + j] = r;
+      fc[j * N + i] = r;
+    }
+  }
+  let sum = 0;
+  for (let k = 0; k < N * N; k++) sum += Math.abs(fc[k]);
+  S.fcMeanAbs = sum / (N * N);
+}
+
+function drawFC() {
+  const cv = $("fcCanvas");
+  if (!cv) return;
+  const ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height;
+  if (W <= 0 || H <= 0) return;
+  ctx.fillStyle = "#0d1117";
+  ctx.fillRect(0, 0, W, H);
+  const N = S.meta ? S.meta.N : 256;
+  if (++S.fcCnt >= 30) { S.fcCnt = 0; computeFC(); }
+  if (!S.fcMatrix) return;
+
+  // offscreen N×N 像素图 → 放大绘制
+  if (!S.fcOff || S.fcOffN !== N) {
+    S.fcOff = document.createElement("canvas");
+    S.fcOff.width = N; S.fcOff.height = N;
+    S.fcOffN = N;
+  }
+  const octx = S.fcOff.getContext("2d");
+  const img = octx.createImageData(N, N);
+  const d = img.data;
+  const signed = S.fcMode === "signed";
+  for (let k = 0; k < N * N; k++) {
+    let t = S.fcMatrix[k];
+    t = signed ? t : Math.abs(t);
+    if (t > 1) t = 1; else if (t < -1) t = -1;
+    const c = bipolarColor(t);
+    d[k * 4] = c[0]; d[k * 4 + 1] = c[1]; d[k * 4 + 2] = c[2]; d[k * 4 + 3] = 255;
+  }
+  octx.putImageData(img, 0, 0);
+  const size = Math.min(W, H);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(S.fcOff, (W - size) / 2, (H - size) / 2, size, size);
+  // 社区边界白线
+  const rowH = size / N;
+  ctx.strokeStyle = "rgba(255,255,255,0.35)";
+  ctx.lineWidth = 1;
+  for (const bd of S.commBd) {
+    const p = (H - size) / 2 + bd * rowH;
+    ctx.beginPath();
+    ctx.moveTo((W - size) / 2, p); ctx.lineTo((W - size) / 2 + size, p); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(p, (H - size) / 2); ctx.lineTo(p, (H - size) / 2 + size); ctx.stroke();
+  }
+  $("fc-mean").textContent = (S.fcMeanAbs || 0).toFixed(3);
+}
+
+/* ---------------- ⑧ 3D 端点约束弹簧链接图 ---------------- */
+function initSpring() {
+  const L = S.layout, N = S.meta.N, OBS = S.meta.OBS, ACT = S.meta.ACTION;
+  const total = N + OBS + ACT;
+  const pos = new Float32Array(total * 3);
+  const vel = new Float32Array(total * 3);
+  const xr = L.range.x1 - L.range.x0, yr = L.range.y1 - L.range.y0;
+  const tauMin = S.meta.tau_min, tauMax = S.meta.tau_max;
+  for (let i = 0; i < N; i++) {
+    pos[i * 3]     = -2.8 + 5.6 * ((L.col_x[i] - L.range.x0) / xr);
+    pos[i * 3 + 1] = -2.8 + 5.6 * ((L.col_y[i] - L.range.y0) / yr);
+    pos[i * 3 + 2] = -1.2 + 2.4 * ((L.tau[i] - tauMin) / (tauMax - tauMin || 1));
+  }
+  // 端点：输入钉左端竖线，输出钉右端竖线
+  for (let j = 0; j < OBS; j++) {
+    const k = N + j;
+    pos[k * 3] = -5.2;
+    pos[k * 3 + 1] = -2.4 + 4.8 * (j + 1) / (OBS + 1);
+    pos[k * 3 + 2] = 0;
+  }
+  for (let i = 0; i < ACT; i++) {
+    const k = N + OBS + i;
+    pos[k * 3] = 5.2;
+    pos[k * 3 + 1] = -1.6 + 3.2 * (i + 1) / (ACT + 1);
+    pos[k * 3 + 2] = 0;
+  }
+  S.spring = {
+    pos, vel, total, N, OBS, ACT,
+    edges: L.rec_edges_3d || [],
+    inEdges: L.W_in_signed || [],
+    outEdges: L.W_out_signed || [],
+    yaw: (S.spring && S.spring.yaw) || 0.75,
+    pitch: (S.spring && S.spring.pitch) || 0.30,
+    zoom: (S.spring && S.spring.zoom) || 1,
+    settleSteps: SETTLE_ITERS,   // 剩余收敛迭代数；归零后物理冻结（只保留旋转/缩放）
+  };
+}
+
+const SETTLE_ITERS = 1500;   // 总收敛迭代数（退火冷却到冻结）
+const STEPS_PER_FRAME = 15;  // 每帧执行的多步物理（约 100 帧内完成收敛动画）
+
+/* 一次物理迭代。temp∈(0,1]：斥力强度与阻尼随温度退火，末段高阻尼 → 稳态冻结 */
+function springStep(sp, temp) {
+  const { pos, vel, N, OBS } = sp;
+  const F = sp._F && sp._F.length === sp.total * 3 ? sp._F : (sp._F = new Float32Array(sp.total * 3));
+  F.fill(0);
+  // 递归弹簧力（长度目标按 alpha 分层：强边更近）
+  for (const [src, tgt, w, alpha] of sp.edges) {
+    const a = src * 3, b = tgt * 3;
+    const dx = pos[b] - pos[a], dy = pos[b + 1] - pos[a + 1], dz = pos[b + 2] - pos[a + 2];
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1e-6;
+    const l0 = 1.7 - 0.9 * alpha;
+    const f = 0.06 * (dist - l0) / dist;
+    F[a] += dx * f; F[a + 1] += dy * f; F[a + 2] += dz * f;
+    F[b] -= dx * f; F[b + 1] -= dy * f; F[b + 2] -= dz * f;
+  }
+  // 输入/输出端点弹簧（弱）
+  for (const [col, inIdx, w] of sp.inEdges) {
+    const a = col * 3, b = (N + inIdx) * 3;
+    const dx = pos[b] - pos[a], dy = pos[b + 1] - pos[a + 1], dz = pos[b + 2] - pos[a + 2];
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1e-6;
+    const f = 0.010 * (dist - 3.4) / dist;
+    F[a] += dx * f; F[a + 1] += dy * f; F[a + 2] += dz * f;
+  }
+  for (const [outIdx, col, w] of sp.outEdges) {
+    const a = col * 3, b = (N + OBS + outIdx) * 3;
+    const dx = pos[b] - pos[a], dy = pos[b + 1] - pos[a + 1], dz = pos[b + 2] - pos[a + 2];
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1e-6;
+    const f = 0.024 * (dist - 2.8) / dist;
+    F[a] += dx * f; F[a + 1] += dy * f; F[a + 2] += dz * f;
+  }
+  // 库仑斥力（子采样对，强度随温度退火衰减避免末段震荡）+ 弱向心力
+  const pairs = 2000;
+  const rep = 0.36 * temp;
+  for (let p = 0; p < pairs; p++) {
+    const i = (Math.random() * N) | 0, j = (Math.random() * N) | 0;
+    if (i === j) continue;
+    const a = i * 3, b = j * 3;
+    const dx = pos[b] - pos[a], dy = pos[b + 1] - pos[a + 1], dz = pos[b + 2] - pos[a + 2];
+    const d2 = dx * dx + dy * dy + dz * dz + 0.04;
+    if (d2 > 20) continue;
+    const f = -rep / (d2 * Math.sqrt(d2));
+    F[a] += dx * f; F[a + 1] += dy * f; F[a + 2] += dz * f;
+    F[b] -= dx * f; F[b + 1] -= dy * f; F[b + 2] -= dz * f;
+  }
+  for (let i = 0; i < N; i++) {
+    const a = i * 3;
+    F[a] -= 0.005 * pos[a]; F[a + 1] -= 0.005 * pos[a + 1]; F[a + 2] -= 0.005 * pos[a + 2];
+  }
+  // 积分（柱体自由，端点钉死）：阻尼随退火升高 + 速度限幅，保证收敛到稳态而非持续震荡
+  const damping = 0.82 + 0.16 * (1 - temp);
+  const vMax = 0.25;
+  for (let i = 0; i < N; i++) {
+    const a = i * 3;
+    for (let c = 0; c < 3; c++) {
+      let v = (vel[a + c] + F[a + c]) * damping;
+      if (v > vMax) v = vMax; else if (v < -vMax) v = -vMax;
+      vel[a + c] = v;
+      pos[a + c] += v;
+    }
+  }
+}
+
+function drawSpring() {
+  const cv = $("springCanvas");
+  if (!cv || !S.layout) return;
+  if (!S.spring) initSpring();
+  const sp = S.spring;
+  const ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height;
+  if (W <= 0 || H <= 0) return;
+  // 稳态收敛：每帧多步物理迭代，温度从 1 线性退火到 0，步数耗尽后布局冻结
+  if (sp.settleSteps > 0) {
+    const steps = Math.min(STEPS_PER_FRAME, sp.settleSteps);
+    for (let k = 0; k < steps; k++) {
+      springStep(sp, Math.max(0.05, sp.settleSteps / SETTLE_ITERS));
+    }
+    sp.settleSteps -= steps;
+  }
+  ctx.fillStyle = "#0d1117";
+  ctx.fillRect(0, 0, W, H);
+  const s = Math.min(W, H) * 0.09;
+  const cx = W / 2, cy = H / 2;
+  const { pos, N, OBS } = sp;
+  const P = (i) => proj3(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2],
+                         cx, cy, s, sp.yaw, sp.pitch, sp.zoom);
+  // 边（先画，压在节点下）
+  ctx.lineWidth = 0.7;
+  for (const [src, tgt, w, alpha] of sp.edges) {
+    const [x0, y0, z0] = P(src), [x1, y1] = P(tgt);
+    const dep = 1 - Math.max(0, Math.min(1, (z0 + 8) / 16)) * 0.6;
+    ctx.strokeStyle = w >= 0
+      ? `rgba(248,81,73,${(0.06 + 0.30 * alpha) * dep})`
+      : `rgba(74,120,255,${(0.06 + 0.30 * alpha) * dep})`;
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  }
+  for (const [col, inIdx, w] of sp.inEdges) {
+    const [x0, y0] = P(N + inIdx), [x1, y1] = P(col);
+    ctx.strokeStyle = "rgba(63,185,80,0.07)";
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  }
+  for (const [outIdx, col, w] of sp.outEdges) {
+    const [x0, y0] = P(col), [x1, y1] = P(N + OBS + outIdx);
+    ctx.strokeStyle = "rgba(230,80,230,0.10)";
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  }
+  // 节点：按深度排序后绘制（painter）。histE 为社区行序，弹簧节点为列 id → 用逆置换换回
+  const Erow = S.histE[S.histLen - 1];
+  let eMin = 1, eMax = 0;
+  if (Erow) for (let i = 0; i < N; i++) { if (Erow[i] < eMin) eMin = Erow[i]; if (Erow[i] > eMax) eMax = Erow[i]; }
+  const eSpan = (eMax - eMin) || 1e-9;
+  const E = Erow ? new Float32Array(N) : null;
+  if (Erow && S.order) for (let r = 0; r < N; r++) E[S.order[r]] = Erow[r];
+  const items = [];
+  for (let i = 0; i < sp.total; i++) {
+    const [x, y, z] = P(i);
+    items.push([z, x, y, i]);
+  }
+  items.sort((a, b) => b[0] - a[0]);
+  for (const [z, x, y, i] of items) {
+    const dep = 1 - Math.max(0, Math.min(1, (z + 8) / 16)) * 0.55;
+    if (i < N) {
+      const comm = S.commOfCol ? S.commOfCol[i] : 0;
+      const hex = COMM_COLORS[comm % COMM_COLORS.length];
+      const rgb = hexRgb(hex);
+      const act = E ? 0.12 + 0.88 * Math.max(0, Math.min(1, (E[i] - eMin) / eSpan)) : 0.3;
+      const r = 3 + 2 * dep;
+      ctx.fillStyle = rgba([rgb[0] * act, rgb[1] * act, rgb[2] * act], dep);
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+    } else if (i < N + OBS) {
+      const j = i - N;
+      ctx.fillStyle = `rgba(63,185,80,${0.5 * dep})`;
+      ctx.fillRect(x - 3, y - 3, 6, 6);
+      ctx.strokeStyle = "#0a0d13"; ctx.lineWidth = 1;
+      ctx.strokeRect(x - 3, y - 3, 6, 6);
+    } else {
+      ctx.save(); ctx.translate(x, y); ctx.rotate(Math.PI / 4);
+      ctx.fillStyle = `rgba(240,161,47,${dep})`;
+      ctx.fillRect(-4, -4, 8, 8);
+      ctx.restore();
+    }
+  }
+  // 锚定端点示意线
+  const [ax0, ay0] = P(N), [ax1, ay1] = P(N + OBS - 1);
+  const [bx0, by0] = P(N + OBS), [bx1, by1] = P(sp.total - 1);
+  ctx.strokeStyle = "rgba(255,255,255,0.15)"; ctx.lineWidth = 1;
+  ctx.setLineDash([3, 4]);
+  ctx.beginPath(); ctx.moveTo(ax0, ay0); ctx.lineTo(ax1, ay1); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(bx0, by0); ctx.lineTo(bx1, by1); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.font = "10px Segoe UI, Microsoft YaHei";
+  ctx.textAlign = "left"; ctx.fillStyle = "#8b98ab";
+  ctx.fillText("◀ 输入锚 " + OBS, ax0 - 30, (ay0 + ay1) / 2);
+  ctx.textAlign = "right";
+  ctx.fillText("输出锚 " + 3 + " ▶", bx0 + 30, (by0 + by1) / 2);
+}
+
+/* ---------------- ⑨ 栅格图 ---------------- */
+function drawRaster() {
+  const cv = $("rasterCanvas");
+  if (!cv) return;
+  const ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height;
+  if (W <= 0 || H <= 0) return;
+  ctx.fillStyle = "#0d1117";
+  ctx.fillRect(0, 0, W, H);
+  if (S.rasGrid.length === 0) return;
+  const N = S.meta.N;
+  const histH = Math.round(H * 0.14);           // 顶部群体发放密度直方图
+  const plotH = H - histH - 4;
+  const colW = W / MAX_HIST;
+  const startCol = MAX_HIST - S.rasGrid.length;
+  const rowH = plotH / N;
+  const img = ctx.createImageData(W, plotH);
+  const d = img.data;
+  for (let p = 0; p < W * plotH; p++) {
+    d[p * 4] = 13; d[p * 4 + 1] = 17; d[p * 4 + 2] = 23; d[p * 4 + 3] = 255;
+  }
+  const counts = new Float32Array(S.rasGrid.length);
+  for (let c = 0; c < S.rasGrid.length; c++) {
+    const fired = S.rasGrid[c];
+    for (let i = 0; i < N; i++) {
+      if (!fired[i]) continue;
+      counts[c]++;
+      const hex = COMM_COLORS[(S.commOfRow ? S.commOfRow[i] : 0) % COMM_COLORS.length];
+      const rgb = hexRgb(hex);
+      const px0 = Math.round((startCol + c) * colW);
+      const px1 = Math.round((startCol + c + 1) * colW);
+      const y0 = Math.round(i * rowH);
+      const y1 = Math.max(y0 + 1, Math.round((i + 1) * rowH));
+      for (let px = px0; px < px1; px++)
+        for (let yy = y0; yy < y1 && yy < plotH; yy++) {
+          const idx = (yy * W + px) * 4;
+          d[idx] = rgb[0]; d[idx + 1] = rgb[1]; d[idx + 2] = rgb[2];
+        }
+    }
+  }
+  // 背景未初始化像素填暗色
+  ctx.putImageData(img, 0, histH + 4);
+  // 社区边界
+  ctx.strokeStyle = "rgba(255,255,255,0.25)";
+  for (const bd of S.commBd) {
+    const y = histH + 4 + Math.round(bd * rowH);
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+  // 顶部密度直方图
+  const maxCnt = Math.max(1, ...counts);
+  ctx.fillStyle = "#7ee2ff";
+  for (let c = 0; c < counts.length; c++) {
+    const hgt = counts[c] / maxCnt * histH;
+    ctx.fillRect((startCol + c) * colW, histH - hgt, Math.max(1, colW - 0.5), hgt);
+  }
+  ctx.strokeStyle = "rgba(255,255,255,0.12)";
+  ctx.beginPath(); ctx.moveTo(0, histH + 2); ctx.lineTo(W, histH + 2); ctx.stroke();
+}
+
+/* ---------------- ⑩ 状态空间轨迹（增量 PCA） ---------------- */
+function computePCA() {
+  const N = S.meta.N, T = S.histLen;
+  if (T < 40) return;
+  const mean = new Float64Array(N);
+  for (let t = 0; t < T; t++) for (let i = 0; i < N; i++) mean[i] += S.histE[t][i] / T;
+  // 预计算中心化数据
+  if (!S._pcX || S._pcX.length !== T) S._pcX = new Array(T);
+  for (let t = 0; t < T; t++) {
+    const E = S.histE[t];
+    const xc = new Float64Array(N);
+    for (let i = 0; i < N; i++) xc[i] = E[i] - mean[i];
+    S._pcX[t] = xc;
+  }
+  // 幂迭代 + Gram-Schmidt 求前 3 主成分
+  const K = 3, iters = 10;
+  const basis = [];
+  const eigs = [0, 0, 0];
+  const rng = mulberry32(1234);
+  for (let k = 0; k < K; k++) {
+    let v = new Float64Array(N);
+    for (let i = 0; i < N; i++) v[i] = rng() * 2 - 1;
+    orthogonalize(v, basis);
+    for (let it = 0; it < iters; it++) {
+      const nv = new Float64Array(N);
+      for (let t = 0; t < T; t++) {
+        const xc = S._pcX[t];
+        let a = 0;
+        for (let i = 0; i < N; i++) a += xc[i] * v[i];
+        for (let i = 0; i < N; i++) nv[i] += a * xc[i];
+      }
+      orthogonalize(nv, basis);
+      let nrm = 0;
+      for (let i = 0; i < N; i++) nrm += nv[i] * nv[i];
+      nrm = Math.sqrt(nrm) || 1e-9;
+      for (let i = 0; i < N; i++) nv[i] /= nrm;
+      v = nv;
+    }
+    let eig = 0;
+    for (let t = 0; t < T; t++) {
+      const xc = S._pcX[t];
+      let a = 0;
+      for (let i = 0; i < N; i++) a += xc[i] * v[i];
+      eig += a * a;
+    }
+    eigs[k] = eig / T;
+    basis.push(v);
+  }
+  S.pcaBasis = basis;
+  S.pcaMean = mean;
+  const tot = eigs[0] + eigs[1] + eigs[2];
+  if (tot > 1e-12) S.pcVar = eigs.map(e => e / tot);
+}
+
+function orthogonalize(v, basis) {
+  for (const b of basis) {
+    let dot = 0;
+    for (let i = 0; i < v.length; i++) dot += v[i] * b[i];
+    for (let i = 0; i < v.length; i++) v[i] -= dot * b[i];
+  }
+}
+
+function mulberry32(a) {
+  return function() {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function drawPhase() {
+  const cv = $("phaseCanvas");
+  if (!cv) return;
+  const ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height;
+  if (W <= 0 || H <= 0) return;
+  ctx.fillStyle = "#0d1117";
+  ctx.fillRect(0, 0, W, H);
+  if (++S.pcaCnt >= 30) { S.pcaCnt = 0; computePCA(); }
+  if (!S.pcaBasis) return;
+  const pv = S.phaseView;
+  // 投影历史帧 → PCA 坐标（按轨迹自身幅度自适应缩放，EMA 平滑防抖）
+  const T = S.histLen;
+  let m = 0;
+  for (let k = 0; k < 3; k++) m += S.pcVar[k];
+  const [b0, b1, b2] = S.pcaBasis;
+  const mean = S.pcaMean;
+  const startCol = MAX_HIST - T;
+  const raw = [];
+  let maxAbs = 1e-9;
+  for (let t = 0; t < T; t++) {
+    const E = S.histE[t];
+    let p0 = 0, p1 = 0, p2 = 0;
+    for (let i = 0; i < E.length; i++) {
+      const dv = E[i] - mean[i];
+      p0 += dv * b0[i]; p1 += dv * b1[i]; p2 += dv * b2[i];
+    }
+    raw.push([p0, p1, p2]);
+    const a = Math.max(Math.abs(p0), Math.abs(p1), Math.abs(p2));
+    if (a > maxAbs) maxAbs = a;
+  }
+  S.phaseScale = S.phaseScale ? (0.9 * S.phaseScale + 0.1 * maxAbs) : maxAbs;
+  const norm = 1 / S.phaseScale;
+  const s = Math.min(W, H) * 0.40;
+  const cx = W / 2, cy = H / 2;
+  const pts = [];
+  for (let t = 0; t < T; t++)
+    pts.push(proj3(raw[t][0] * norm, raw[t][1] * norm, raw[t][2] * norm,
+                   cx, cy, s, pv.yaw, pv.pitch, pv.zoom));
+  // 参考立方体线框（±1）
+  ctx.strokeStyle = "rgba(255,255,255,0.08)";
+  ctx.lineWidth = 1;
+  const cube = [];
+  for (const gx of [-1, 1]) for (const gy of [-1, 1]) for (const gz of [-1, 1])
+    cube.push(proj3(gx, gy, gz, cx, cy, s, pv.yaw, pv.pitch, pv.zoom));
+  const wire = [[0,1],[0,2],[1,3],[2,3],[4,5],[4,6],[5,7],[6,7],[0,4],[1,5],[2,6],[3,7]];
+  for (const [a, b] of wire) {
+    ctx.beginPath(); ctx.moveTo(cube[a][0], cube[a][1]); ctx.lineTo(cube[b][0], cube[b][1]); ctx.stroke();
+  }
+  // 轨迹折线（渐隐尾迹）
+  for (let t = 1; t < T; t++) {
+    const alpha = 0.08 + 0.92 * (t / T);
+    ctx.strokeStyle = `rgba(126,226,255,${alpha})`;
+    ctx.lineWidth = 1 + 1.2 * (t / T);
+    ctx.beginPath();
+    ctx.moveTo(pts[t - 1][0], pts[t - 1][1]);
+    ctx.lineTo(pts[t][0], pts[t][1]);
+    ctx.stroke();
+  }
+  // 吃到食物时刻金色标记
+  ctx.fillStyle = "#ffd23d";
+  for (let t = 0; t < T; t++) {
+    if (!S.histAte[t]) continue;
+    ctx.beginPath(); ctx.arc(pts[t][0], pts[t][1], 2.6, 0, Math.PI * 2); ctx.fill();
+  }
+  // 头部亮点
+  const head = pts[T - 1];
+  ctx.fillStyle = "#ffffff";
+  ctx.beginPath(); ctx.arc(head[0], head[1], 3.5, 0, Math.PI * 2); ctx.fill();
+  $("pcVar").textContent = S.pcVar.map(v => (v * 100).toFixed(0) + "%").join("/");
 }
 
 /* ---------------- SSE ---------------- */
@@ -854,7 +1450,13 @@ function connectSSE() {
 
 function clearHistory() {
   S.histObs = []; S.histE = []; S.histTau = []; S.histEx = []; S.histInH = [];
-  S.histLogits = []; S.histActions = []; S.histSwitch = []; S.histLen = 0;
+  S.histLogits = []; S.histActions = []; S.histSwitch = []; S.histAte = [];
+  S.histLen = 0;
+  // 神经分析面板：新局重置动态状态（PCA 基 / FC 矩阵 / 栅格 EMA 基线）
+  S.pcaBasis = null; S.pcaCnt = 0; S.fcCnt = 0;
+  S.phaseScale = null;
+  S.rasMean = null; S.rasVar = null; S.rasLast = null;
+  S.rasGrid = [];
 }
 
 function handleInit(msg) {
@@ -889,6 +1491,11 @@ function handleInit(msg) {
     acc += c.size;
     if (acc < msg.meta.N) S.commBd.push(acc);
   }
+  buildCommOfRow();
+  // 列 id → 社区（弹簧图节点按列 id 索引）
+  S.commOfCol = new Array(msg.meta.N).fill(0);
+  for (let r = 0; r < msg.meta.N; r++) S.commOfCol[S.order[r]] = S.commOfRow[r];
+  S.spring = null;   // 模型切换后重建弹簧布局
   clearHistory();
   S.cur = null;
 
@@ -964,6 +1571,30 @@ window.addEventListener("DOMContentLoaded", () => {
     resizeHeatCanvas();
   });
   $("heatHVal").textContent = S.heatRowH + "px";
+
+  // ---- 神经分析面板控制 ----
+  $("fcModeBtn").onclick = () => {
+    S.fcMode = S.fcMode === "abs" ? "signed" : "abs";
+    $("fcModeBtn").textContent = S.fcMode === "abs" ? "|r|" : "±r";
+  };
+  $("springPhysBtn").onclick = () => {
+    // 重排：从当前位置加微扰后重新退火收敛（保留当前视角）
+    if (!S.spring) return;
+    const { pos, vel, N } = S.spring;
+    for (let i = 0; i < N * 3; i++) {
+      pos[i] += (Math.random() - 0.5) * 0.6;
+      vel[i] = 0;
+    }
+    S.spring.settleSteps = SETTLE_ITERS;
+  };
+  $("springResetBtn").onclick = () => { initSpring(); };
+  $("rasKSlider").addEventListener("input", e => {
+    S.rasK = parseFloat(e.target.value);
+    $("rasKVal").textContent = S.rasK.toFixed(2);
+  });
+  bindDrag3D("springCanvas", () => S.spring,
+    (v) => { S.spring.yaw = v.yaw; S.spring.pitch = v.pitch; S.spring.zoom = v.zoom; });
+  bindDrag3D("phaseCanvas", () => S.phaseView, (v) => Object.assign(S.phaseView, v));
 
   $("btnNew").onclick = () => {
     doControl("action=new", $("btnNew"));

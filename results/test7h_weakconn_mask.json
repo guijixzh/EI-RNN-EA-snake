@@ -1,0 +1,38 @@
+{
+ "baseline": {
+  "food_mean": 38.474998474121094,
+  "food_std": 0.0,
+  "turn_density": 0.8970109224319458,
+  "n_masked": 0
+ },
+ "rec10": {
+  "food_mean": 37.07500076293945,
+  "food_std": 0.0,
+  "turn_density": 0.8891800045967102,
+  "n_masked": 42508
+ },
+ "rec20": {
+  "food_mean": 40.275001525878906,
+  "food_std": 0.0,
+  "turn_density": 0.8967415690422058,
+  "n_masked": 85016
+ },
+ "rec30": {
+  "food_mean": 39.57500076293945,
+  "food_std": 0.0,
+  "turn_density": 0.8841732740402222,
+  "n_masked": 127524
+ },
+ "rec40": {
+  "food_mean": 37.650001525878906,
+  "food_std": 0.0,
+  "turn_density": 0.8900569081306458,
+  "n_masked": 170032
+ },
+ "all20": {
+  "food_mean": 40.150001525878906,
+  "food_std": 0.0,
+  "turn_density": 0.8846515417098999,
+  "n_masked": 96800
+ }
+}

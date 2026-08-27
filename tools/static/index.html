@@ -55,7 +55,7 @@
   main {
     flex: 1; display: grid;
     grid-template-columns: repeat(12, 1fr);
-    grid-template-rows: 0.9fr 1.6fr;
+    grid-template-rows: 0.9fr 1.25fr 1.35fr;
     gap: 8px; padding: 8px; min-height: 0;
   }
   .card {
@@ -78,7 +78,26 @@
   #input-card { grid-column: span 3; }
   #output-card { grid-column: span 2; }
   #topo-card { grid-column: span 4; }
+  #fc-card { grid-column: span 3; }
+  #spring-card { grid-column: span 5; }
+  #raster-card { grid-column: span 2; }
+  #phase-card { grid-column: span 2; }
   #heat-card { grid-column: span 12; }
+
+  /* 神经分析卡片工具行 */
+  .ana-ctl {
+    display: flex; align-items: center; gap: 6px; margin-left: auto; flex: none;
+    font-size: 10px; color: var(--muted);
+  }
+  .ana-ctl button {
+    background: var(--panel2); color: var(--muted); border: 1px solid var(--border);
+    border-radius: 4px; padding: 1px 7px; font-size: 10px; cursor: pointer; font-family: inherit;
+  }
+  .ana-ctl button:hover { color: var(--text); border-color: var(--accent); }
+  .ana-ctl input[type=range] { width: 54px; accent-color: var(--accent); }
+  .ana-ctl .sub-val { min-width: 26px; text-align: right; font-variant-numeric: tabular-nums; }
+  canvas.ana { position: absolute; inset: 0; }
+  #fcCanvas, #rasterCanvas { image-rendering: pixelated; }
 
   #game-wrap { display: flex; align-items: center; justify-content: center; padding: 5px; }
   #gameCanvas { width: 300px; height: 300px; image-rendering: pixelated; }
@@ -236,7 +255,45 @@
       <div class="card-body"><canvas id="topoCanvas"></canvas></div>
     </div>
 
-    <!-- 行2：实时热力图监控（tab 子选项切换，独占整卡高度以便看清） -->
+    <!-- 行2：神经分析面板 -->
+    <div class="card" id="fc-card">
+      <div class="card-title">⑦ 功能连接性 FC <span class="sub" id="fc-sub">Pearson r · 窗口150步</span>
+        <div class="ana-ctl">
+          <button id="fcModeBtn">|r|</button>
+          <span class="sub-val" id="fc-mean">--</span>
+        </div>
+      </div>
+      <div class="card-body"><canvas id="fcCanvas" class="ana"></canvas></div>
+    </div>
+
+    <div class="card" id="spring-card">
+      <div class="card-title">⑧ 3D 弹簧链接图 <span class="sub">稳态布局 · 端点约束 · 拖拽旋转</span>
+        <div class="ana-ctl">
+          <button id="springPhysBtn">🔀 重排</button>
+          <button id="springResetBtn">重置</button>
+        </div>
+      </div>
+      <div class="card-body"><canvas id="springCanvas" class="ana"></canvas></div>
+    </div>
+
+    <div class="card" id="raster-card">
+      <div class="card-title">⑨ 栅格图 <span class="sub">E &gt; μ+kσ</span>
+        <div class="ana-ctl">
+          <label>k<input type="range" id="rasKSlider" min="1" max="4" step="0.25" value="2"></label>
+          <span class="sub-val" id="rasKVal">2.0</span>
+        </div>
+      </div>
+      <div class="card-body"><canvas id="rasterCanvas" class="ana"></canvas></div>
+    </div>
+
+    <div class="card" id="phase-card">
+      <div class="card-title">⑩ 状态空间轨迹 <span class="sub">PCA·3主成分 · 拖拽旋转</span>
+        <div class="ana-ctl"><span class="sub-val" id="pcVar">--</span></div>
+      </div>
+      <div class="card-body"><canvas id="phaseCanvas" class="ana"></canvas></div>
+    </div>
+
+    <!-- 行3：实时热力图监控（tab 子选项切换，独占整卡高度以便看清） -->
     <div class="card" id="heat-card">
       <div class="card-title">④⑥ 实时热力图监控 <span class="sub">最近 150 步 · 点击下方子选项独占查看</span></div>
       <div id="heat-tabs">

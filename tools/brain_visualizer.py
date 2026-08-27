@@ -63,6 +63,7 @@ DEFAULT_MODEL_KEY = next(
      if os.path.exists(os.path.join(REPO_ROOT, fname))), "5a")
 
 TOP_REC_EDGES = 140      # 拓扑图中展示的递归边 top-K 条数
+TOP_REC_EDGES_3D = 900   # 3D 弹簧图使用的递归边 top-K 条数
 
 
 # ============================================================
@@ -391,6 +392,18 @@ def compute_layout(brain, cfg):
             alpha = (abs(w) - w_min) / (w_max - w_min + 1e-8)
             rec_edges.append([src, tgt, w, float(alpha)])
 
+    # 3D 弹簧图边表：top-K 按 |w| 排序，保留符号与归一化强度
+    edges_3d = [(j, i, float(W_rec_np[i, j]))
+                for i in range(N) for j in range(N) if M_rec_np[i, j] > 0]
+    edges_3d.sort(key=lambda e: -abs(e[2]))
+    rec_edges_3d = []
+    if edges_3d:
+        abs_ws = [abs(e[2]) for e in edges_3d]
+        w_min, w_max = min(abs_ws), max(abs_ws)
+        for src, tgt, w in edges_3d[:TOP_REC_EDGES_3D]:
+            alpha = (abs(w) - w_min) / (w_max - w_min + 1e-8)
+            rec_edges_3d.append([src, tgt, round(w, 4), round(float(alpha), 3)])
+
     return {
         "col_x": [float(pos_col[i][0]) for i in range(N)],
         "col_y": [float(pos_col[i][1]) for i in range(N)],
@@ -405,6 +418,13 @@ def compute_layout(brain, cfg):
         "in_edges": in_edges,
         "out_edges": out_edges,
         "rec_edges": rec_edges,
+        "rec_edges_3d": rec_edges_3d,
+        "W_in_signed": [[i, j, round(float(W_in_np[i, j]), 4)]
+                        for i in range(N) for j in range(brain.obs_dim)
+                        if M_in_np[i, j] > 0],
+        "W_out_signed": [[i, j, round(float(W_out_np[i, j]), 4)]
+                         for i in range(brain.action_dim) for j in range(N)
+                         if M_out_np[i, j] > 0],
         "tau": [float(v) for v in tau],
         "in_degree": [int(v) for v in brain.M_rec.sum(dim=0).numpy()],
         "range": {"x0": -1.1, "x1": OUT_X + 0.9, "y0": -0.8, "y1": total_height + 0.8},
