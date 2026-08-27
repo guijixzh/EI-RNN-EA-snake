@@ -1,6 +1,18 @@
 # ==========================================
 # test7h.py —— CRN 精确筛选 + 两阶段淘汰 + 类正态变异版（基于 test7g，诊断驱动）
 #
+# v2（解法器基准校准，experiments/solver_reference.py）：
+#  - 适应度转弯效率升为一等力量：W 0.5→3.0、CAP 8→4（ratio 口径 SL/TL）。
+#    依据：同库同食数配对下，有序解法器比 7h/7b 模型高 +1.6 分（> 单食边际
+#    1.25 → 渐进转型可攀爬）；旧参数仅 +0.15 分形同虚设。CAP=4 ⇔ 密度 0.25
+#    饱和 → 长直段折叠拿满 3 分不被压制（7d 乘法计价压折叠的教训不复发）。
+#  - 评估期弱连接屏蔽 W_rec×20%（训练=部署同口径，实测 +1.8 分）。
+#  - FITNESS_VERSION：断点跨版本续训自动重置 best 追踪。
+#  - 重要实验事实：纯哈密顿回路跟随 40/40 全部饿死（均 0.4 食）——饿死钟
+#    （3·len+20）在蛇长<27 时短于回路平均遇食距离 ~50 步，环境规则本身
+#    禁止纯有序策略，早期强制抄近路；有序参考 = 回路+安全捷径（密度 0.30，
+#    te 3.2，每食物 9 步）。
+#
 # test7g 40 平台诊断结论（experiments/diagnose_test7g_plateau.py，40 局实测）：
 #  - 适应度排序无过错：τ(现适应度, food)=0.99、反转 0 例；7b 脑在本适应度下
 #    可得 ~60 分而种群困在 ~40 → 瓶颈在选择噪声与血统，不在公式；
@@ -89,10 +101,27 @@ class Config:
     # --- 适应度模式：'econ'=三项和式（本版主模式）| 'tuple'=元组字典序 ---
     FIT_MODE = 'econ'
 
-    # --- econ：fitness = food + W_e·eff + W_t·min(SL/TL,CAP)/CAP ---
+    # --- 适应度版本（公式变更时 +1；断点版本不一致则重置 best 追踪）---
+    FITNESS_VERSION = 2
+
+    # --- econ：fitness = food + W_e·eff + W_t·min(SL/TL, CAP)/CAP ---
     FOOD_EFF_WEIGHT = 0.3   # 吃子效率权重（7b 验证量级，防固定回路退化）
-    TURN_EFF_W = 0.5        # 转弯效率 tie-breaker 权重（项幅 ≤0.5 分）
-    TURN_EFF_CAP = 8.0      # 转弯效率饱和上限（密度 <1/8 不再加分）
+    # 转弯效率（解法器基准实测校准，results/test7h_solver_reference.json）：
+    #   有序解法器 te=SL/TL≈3.2 / 密度 0.30；模型 te≈1.13 / 密度 0.88。
+    #   W=3, CAP=4 → 同食数下解法器比模型高 ~1.6 分 > 单食边际 1.25 分
+    #   → 渐进转型的变异体（少 1 食但路径有序）仍胜出，选择可攀爬；
+    #   旧参数 W=0.5/CAP=8 仅 +0.15 分（形同虚设）。
+    #   CAP=4 ⇔ 密度 0.25（长直段折返）即饱和 → 折叠不受压制；
+    #   后期"多转弯换一食"的损失 ≤0.3 分，不可能阻断吃食。
+    TURN_EFF_W = 3.0        # 转弯效率权重（项幅 ≤3 分）
+    TURN_EFF_CAP = 4.0      # 转弯效率饱和上限（SL/TL ≥ 4 后不再加分）
+    TURN_EFF_MODE = 'ratio'  # 'ratio'=SL/TL | 'tpf'=每食物转弯数（备选口径）
+
+    # --- 评估期弱连接屏蔽（H2，训练=部署同口径；基因不动）---
+    # 实测屏蔽 W_rec 最弱 20% 在同库配对下 +1.8 分（10% 反而 −1.4，
+    # 30% +1.1，40% −0.8）：弱内连接是 ~2 分的内噪损耗。进化评估即用
+    # 屏蔽后的成绩 → 训练产物=部署形态。
+    WEAK_MASK_FRAC = 0.20
 
     # --- 单侧转弯判死（保持关闭：早期随机个体普遍摇头，判罚干扰初期筛选）---
     ONE_SIDED_TURN_DEATH = False
@@ -194,13 +223,14 @@ def _freeze_active_groups(gen, cfg):
 
 
 def _fitness_econ(m, cfg):
-    """三项和式适应度（food 主导 + 微量吃子效率 + 微量转弯效率 tie-breaker）：
+    """三项和式适应度（food 主导 + 微量吃子效率 + 转弯效率一等力量）：
     fitness = food + EFF_W·(food/steps_last)
-              + TURN_EFF_W·min(steps_last/turns_last, CAP)/CAP
-    - 转弯效率窗口截断到"最后一食为止"：整局口径下末食后直行游荡到饿死
-      会白拿无穷高效率（免费分漏洞）；
-    - 项幅 ≤0.5 分：实测 7b 穿行密度 0.88 与平台脑游荡 0.80 几乎相同，
-      转弯项不可能区分有用穿行与无用游荡，只做同分 tie-breaker；
+              + TURN_EFF_W · min(steps_last/turns_last, CAP)/CAP     [ratio 模式]
+              + TURN_EFF_W · max(0, 1 − (turns_last/food)/CAP_TPF)   [tpf 备选]
+    - 转弯效率窗口截断到"最后一食为止"（SL/TL 同窗口，游荡不改变比值）；
+    - W=3/CAP=4 由解法器基准校准（见 Config 注释）：同食数下有序路径
+      比模型高 ~1.6 分 > 单食边际 1.25 → 渐进可攀爬；CAP=4 即密度 0.25
+      饱和 → 长直段折叠拿满，不被压制；
     - turns_last=0 且 food>0 → 效率取 CAP（全程直行=完美）。
     m 列：0 food, 1 seen, 2 unseen, 3 steps_last, 10 turns_last
     """
@@ -210,11 +240,14 @@ def _fitness_econ(m, cfg):
     if food <= 0:
         return 0.0
     eff = food / max(steps_last, 1.0)
-    cap = float(getattr(cfg, 'TURN_EFF_CAP', 8.0))
-    te = cap if turns_last <= 0 else min(steps_last / max(turns_last, 1.0), cap)
-    return (food
-            + float(getattr(cfg, 'FOOD_EFF_WEIGHT', 0.3)) * eff
-            + float(getattr(cfg, 'TURN_EFF_W', 0.5)) * te / cap)
+    cap = float(getattr(cfg, 'TURN_EFF_CAP', 4.0))
+    w = float(getattr(cfg, 'TURN_EFF_W', 3.0))
+    if getattr(cfg, 'TURN_EFF_MODE', 'ratio') == 'tpf':
+        te_pts = max(0.0, 1.0 - (turns_last / food) / 10.0)
+    else:
+        te = cap if turns_last <= 0 else min(steps_last / max(turns_last, 1.0), cap)
+        te_pts = te / cap
+    return food + float(getattr(cfg, 'FOOD_EFF_WEIGHT', 0.3)) * eff + w * te_pts
 
 
 def _fitness_tuple(m, cfg):
@@ -662,17 +695,25 @@ class BatchedSnakeEnv:
             d + right,                   # 7 右前
         ]
 
-        # --- [8:16] 食物 8 扇区投影（曼哈顿一致：û 原始整数向量，分母 (|dr|+|dc|)²，
-        #     同 d1 最强扇区信号恒等于 K/d1²，与方位无关）---
+        # --- [8:16] 食物 8 扇区投影 ---
+        # 曼哈顿一致（默认）：û 原始整数向量，分母 (|dr|+|dc|)²，同 d1 最强扇区
+        #   信号恒等于 K/d1²，与方位无关（欧氏对角偏置 √2 已验证为错误启发）。
+        # 欧氏分支仅为 pre-7g 模型（如 7b）诊断评估保留，训练不得使用。
         ar = torch.arange(B, device=dev)
         vr = (food[:, 0] - head[:, 0]).float()
         vc = (food[:, 1] - head[:, 1]).float()
-        d2 = (vr.abs() + vc.abs()).clamp(min=1.0)
+        manhattan = bool(getattr(self.cfg, 'OBS_MANHATTAN', True))
+        d2 = ((vr.abs() + vc.abs()).clamp(min=1.0)) if manhattan else \
+             (vr * vr + vc * vc).clamp(min=1.0)
         k_scale = float(getattr(self.cfg, 'OBS_FOOD_SCALE', 1.0))
         for i in range(8):
             dx = d8[i][:, 0].float()
             dy = d8[i][:, 1].float()
-            dot = vr * dx + vc * dy                  # û 原始整数向量，对角点积=轴分量和
+            if manhattan:
+                dot = vr * dx + vc * dy                  # û 原始整数向量
+            else:
+                norm = torch.sqrt(dx * dx + dy * dy)     # 1 或 √2
+                dot = (vr * dx + vc * dy) / norm
             obs[:, 8 + i] = torch.clamp(dot, min=0.0) / d2 * k_scale
 
         # --- [16:24] 自身 8 扇区距离倒数 ---
@@ -954,10 +995,37 @@ def _eval_sweep_chunk(pop_rep, cfg, bank):
     return metrics
 
 
+def apply_weak_mask(pop, cfg):
+    """评估期弱连接屏蔽（原地作用于 pop 的 W_rec——pop[idx] 是拷贝，基因栈安全）：
+    每个体活跃连接中 |W_rec| 最小的 WEAK_MASK_FRAC 比例置零。
+    逐行 kthvalue 阈值实现（避免 CUDA sort/gather 与 inf 哨兵的兼容性问题；
+    阈值上的并列幅值可能多置零数个，确定性无碍）。"""
+    frac = float(getattr(cfg, 'WEAK_MASK_FRAC', 0.0))
+    if frac <= 0 or pop.W_rec is None:
+        return
+    with torch.no_grad():
+        W = pop.W_rec.float()
+        M = pop.M_rec
+        mag = W.abs() * M
+        keep = M > 0
+        for r in range(W.shape[0]):
+            m_r = mag[r][keep[r]]
+            if m_r.numel() == 0:
+                continue
+            kk = int(math.ceil(m_r.numel() * frac))
+            if kk <= 0:
+                continue
+            thr = torch.kthvalue(m_r, kk).values
+            zero = keep[r] & (mag[r] <= thr)
+            W[r] = torch.where(zero, torch.zeros_like(W[r]), W[r])
+        pop.W_rec = W.to(pop.dtype)
+
+
 def _eval_pop_banks(pop, cfg, banks):
     """E=len(banks) 局并行评估：个体×E 复制进同一批扫描（局维折叠，扫描次数
     不随局数增长——GPU 利用率低时墙上时间 ∝ 扫描次数而非局数）。
-    所有分块共用同一组 banks（CRN 关键）。返回 [P,12] = E 局均值。"""
+    所有分块共用同一组 banks（CRN 关键）；评估副本先做弱连接屏蔽。
+    返回 [P,12] = E 局均值。"""
     E = len(banks)
     dev = pop.device
     use_crn = banks[0] is not None
@@ -974,7 +1042,8 @@ def _eval_pop_banks(pop, cfg, banks):
         hi = min(lo + per_P, pop.P)
         n = hi - lo
         idx = torch.arange(lo, hi, device=dev).repeat(E)   # 块布局：e = 行 // n
-        sub = pop[idx]
+        sub = pop[idx]                                      # 高级索引=拷贝，可安全屏蔽
+        apply_weak_mask(sub, cfg)
         sub.refresh_eff()
         m = _eval_sweep_chunk(sub, cfg, bank).cpu()
         out[lo:hi] = m.view(E, n, 12).mean(dim=0)
@@ -1257,6 +1326,10 @@ def run_training(cfg):
           f"{cfg.STAGE2_KEEP} → K2={cfg.EVAL_EPISODES} | "
           f"变异 s~{cfg.MUT_SCALE_DIST}(σ={cfg.MUT_SCALE_SIGMA}) "
           f"clip[{cfg.MUT_SCALE_MIN},{cfg.MUT_SCALE_MAX}]")
+    print(f"[适应度 v{cfg.FITNESS_VERSION}] food + {cfg.FOOD_EFF_WEIGHT}·eff + "
+          f"{cfg.TURN_EFF_W}·min(SL/TL,{cfg.TURN_EFF_CAP:.0f})/{cfg.TURN_EFF_CAP:.0f}"
+          f"（{cfg.TURN_EFF_MODE} 口径）| 弱连接屏蔽 "
+          f"W_rec×{1 - cfg.WEAK_MASK_FRAC:.0%}")
     t_program = time.perf_counter()
 
     start_gen = 0
@@ -1299,11 +1372,22 @@ def run_training(cfg):
             best_unseen = float(ck.get('best_unseen', 0.0))
             best_last = float(ck.get('best_last', 0.0))
             best_prox = float(ck.get('best_prox', 0.0))
+            best_row = np.zeros(12)
+            best_row[1] = 99999.0
             if 'best_row' in ck:
                 best_row = np.asarray(ck['best_row'], dtype=np.float64)
             if best_state is not None:
                 random.setstate(ck['random_state'])
                 torch.set_rng_state(ck['torch_rng_state'])
+            # 适应度版本变化 → 旧 best 行跨公式不可比，重置追踪（history 保留）
+            ck_ver = int(ck.get('config', {}).get('FITNESS_VERSION', 1))
+            if ck_ver != int(getattr(cfg, 'FITNESS_VERSION', 1)):
+                best_row = np.zeros(12)
+                best_row[1] = 99999.0
+                best_state = None
+                best_food = -1.0
+                print(f"  [适应度版本变更 v{ck_ver} -> v{cfg.FITNESS_VERSION}] "
+                      f"best 追踪已重置（种群与历史保留，从本代重新记录）")
             print(f"=== 检测到断点 [{cfg.CHECKPOINT_PATH}] ===")
             print(f"  已完成 {start_gen} 代 -> 从第 {start_gen} 代接续 | "
                   f"历史最优: Food={best_food:.1f} | 已耗时 {cum_eval_time + cum_evolve_time:.1f}s")
@@ -1537,20 +1621,26 @@ def play_best(cfg, max_steps=300):
 # 8. 自检（CRN 确定性 / 变异分布 / 适应度公式）
 # ==========================================
 def selfcheck(cfg):
-    print("=== 自检 1：适应度公式 ===")
+    print("=== 自检 1：适应度公式（v2：ratio W=3 CAP=4）===")
     m = np.zeros(12)
-    m[0], m[3], m[10] = 10.0, 100.0, 10.0   # food=10, SL=100, TL=10 → eff=0.1, te=10→cap
+    m[0], m[3], m[10] = 10.0, 100.0, 10.0   # food=10, SL=100, TL=10 → te=10→cap
     f1 = _fitness_econ(m, cfg)
-    expect1 = 10 + 0.3 * 0.1 + 0.5 * 1.0
+    expect1 = 10 + 0.3 * 0.1 + 3.0 * 1.0
     m[10] = 0.0                              # 全程直行 → te=cap
     f2 = _fitness_econ(m, cfg)
+    m2 = np.zeros(12)                        # 高密度：SL=100, TL=50 → te=2 → 1.5 分
+    m2[0], m2[3], m2[10] = 10.0, 100.0, 50.0
+    f3 = _fitness_econ(m2, cfg)
+    expect3 = 10 + 0.3 * 0.1 + 3.0 * 0.5
     m[0] = 0.0                               # 零食 → 0
-    f3 = _fitness_econ(m, cfg)
-    print(f"  food10/SL100/TL10: {f1:.4f} (期望 {expect1:.4f}) "
+    f4 = _fitness_econ(m, cfg)
+    print(f"  有序(te≥cap): {f1:.4f} (期望 {expect1:.4f}) "
           f"{'OK' if abs(f1 - expect1) < 1e-9 else 'FAIL'}")
-    print(f"  TL=0 全直行: {f2:.4f} (应= {expect1:.4f}) "
+    print(f"  全直行: {f2:.4f} (应= {expect1:.4f}) "
           f"{'OK' if abs(f2 - expect1) < 1e-9 else 'FAIL'}")
-    print(f"  food=0: {f3:.4f} (期望 0) {'OK' if f3 == 0.0 else 'FAIL'}")
+    print(f"  高密度(te=2): {f3:.4f} (期望 {expect3:.4f}) "
+          f"{'OK' if abs(f3 - expect3) < 1e-9 else 'FAIL'}")
+    print(f"  food=0: {f4:.4f} (期望 0) {'OK' if f4 == 0.0 else 'FAIL'}")
 
     print("=== 自检 2：变异强度分布 ===")
     dev = _resolve_device(cfg)
@@ -1560,12 +1650,28 @@ def selfcheck(cfg):
           f"| P(s<0.5)={float((s < 0.5).float().mean()):.4f} "
           f"| max {s.max():.3f}")
 
-    print("=== 自检 3：CRN 确定性（同代同库两跑逐位一致，小种群）===")
+    print("=== 自检 3：弱连接屏蔽生效校验 ===")
+    torch.manual_seed(11)
+    p3 = GeneStack(cfg, B=16, device=dev)
+    p3.random_init()
+    frac = float(cfg.WEAK_MASK_FRAC)
+    w_before = p3.W_rec.clone()
+    p3c = p3[torch.arange(16, device=dev)]           # 拷贝（模拟评估路径）
+    before = (p3c.W_rec * p3c.M_rec != 0).sum().item()
+    apply_weak_mask(p3c, cfg)
+    after = (p3c.W_rec * p3c.M_rec != 0).sum().item()
+    genes_intact = torch.equal(p3.W_rec, w_before)
+    print(f"  活跃 W_rec 连接 {before} → {after}（屏蔽 {1 - after / before:.1%}，"
+          f"目标 {frac:.0%}）| 原基因栈未动: {genes_intact} "
+          f"{'OK' if genes_intact and abs((1 - after / before) - frac) < 0.02 else 'FAIL'}")
+
+    print("=== 自检 4：CRN 确定性（同代同库两跑逐位一致，小种群，含屏蔽）===")
     sc = Config()                     # 独立小配置：自检不该跑全尺寸种群
     sc.POP_SIZE, sc.NUM_COLUMNS = 64, 32
     sc.ELITE_SIZE, sc.STAGE1_EPS, sc.EVAL_EPISODES, sc.STAGE2_KEEP = 16, 2, 3, 32
     sc.MAX_STEPS, sc.EVAL_BATCH, sc.USE_FP16 = 400, 64, cfg.USE_FP16
     sc.DEVICE = cfg.DEVICE
+    sc.WEAK_MASK_FRAC = cfg.WEAK_MASK_FRAC
     torch.manual_seed(7)
     pop = GeneStack(sc, device=_resolve_device(sc))
     pop.random_init()
@@ -1624,9 +1730,14 @@ def main():
     ap.add_argument('--eff-weight', type=float, default=None,
                     help='吃子效率权重（默认 0.3）')
     ap.add_argument('--turn-eff-w', type=float, default=None,
-                    help='转弯效率 tie-breaker 权重（默认 0.5）')
+                    help='转弯效率权重（默认 3.0，解法器基准校准）')
     ap.add_argument('--turn-eff-cap', type=float, default=None,
-                    help='转弯效率饱和上限（默认 8）')
+                    help='转弯效率饱和上限（默认 4，密度 0.25 饱和）')
+    ap.add_argument('--turn-eff-mode', type=str, default=None,
+                    choices=['ratio', 'tpf'],
+                    help='转弯效率口径：ratio=SL/TL（默认）| tpf=每食物转弯数（备选）')
+    ap.add_argument('--weak-mask-frac', type=float, default=None,
+                    help='评估期 W_rec 弱连接屏蔽比例（默认 0.20，0=关）')
     ap.add_argument('--stage1-eps', type=int, default=None,
                     help='阶段1 局数 K1（默认 3）')
     ap.add_argument('--stage2-eps', type=int, default=None,
@@ -1679,6 +1790,10 @@ def main():
         cfg.TURN_EFF_W = args.turn_eff_w
     if args.turn_eff_cap is not None:
         cfg.TURN_EFF_CAP = args.turn_eff_cap
+    if args.turn_eff_mode:
+        cfg.TURN_EFF_MODE = args.turn_eff_mode
+    if args.weak_mask_frac is not None:
+        cfg.WEAK_MASK_FRAC = args.weak_mask_frac
     if args.stage1_eps is not None:
         cfg.STAGE1_EPS = args.stage1_eps
     if args.stage2_eps is not None:

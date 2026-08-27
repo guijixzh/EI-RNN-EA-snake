@@ -1,0 +1,442 @@
+{
+ "S1_full": {
+  "food_mean": 0.425,
+  "food_min": 0,
+  "food_max": 6,
+  "died_wall": 0,
+  "died_self": 0,
+  "died_starve": 40
+ },
+ "S2_full": {
+  "food_mean": 48.925,
+  "food_min": 10,
+  "food_max": 98,
+  "died_wall": 4,
+  "died_self": 36,
+  "died_starve": 0
+ },
+ "7h_best_vs_S1_common": {
+  "fitness": {
+   "cur_W0.5": {
+    "win_rate": 0.9,
+    "margin_mean": 0.17858240861919675,
+    "margin_min": -0.14879385964912273,
+    "n": 10
+   },
+   "ratio_W1.5": {
+    "win_rate": 1.0,
+    "margin_mean": 0.5750567675935558,
+    "margin_min": 0.08750000000000013,
+    "n": 10
+   },
+   "ratio_W3.0": {
+    "win_rate": 1.0,
+    "margin_mean": 1.1697683060550943,
+    "margin_min": 0.21250000000000013,
+    "n": 10
+   },
+   "tpf_W3.0": {
+    "win_rate": 0.8,
+    "margin_mean": 0.7503452291320172,
+    "margin_min": -1.784210526315789,
+    "n": 10
+   },
+   "noeff_W3.0": {
+    "win_rate": 1.0,
+    "margin_mean": 1.189423076923077,
+    "margin_min": 0.25,
+    "n": 10
+   }
+  },
+  "profiles": {
+   "solver": {
+    "density": 0.26925146667792177,
+    "tpf": 2.7,
+    "spf": 10.083333333333334,
+    "last5_density": 0.26702334996704646,
+    "last5_tpf": 2.6399999999999997,
+    "food": 1.7
+   },
+   "model": {
+    "density": 0.8654416282642089,
+    "tpf": 5.266666666666667,
+    "spf": 6.133333333333334,
+    "last5_density": 0.8667857142857143,
+    "last5_tpf": 5.213333333333333,
+    "food": 1.7
+   }
+  },
+  "model_food_mean": 38.025
+ },
+ "7h_best_vs_S1_model": {
+  "fitness": {
+   "cur_W0.5": {
+    "win_rate": NaN,
+    "margin_mean": NaN,
+    "margin_min": NaN,
+    "n": 0
+   },
+   "ratio_W1.5": {
+    "win_rate": NaN,
+    "margin_mean": NaN,
+    "margin_min": NaN,
+    "n": 0
+   },
+   "ratio_W3.0": {
+    "win_rate": NaN,
+    "margin_mean": NaN,
+    "margin_min": NaN,
+    "n": 0
+   },
+   "tpf_W3.0": {
+    "win_rate": NaN,
+    "margin_mean": NaN,
+    "margin_min": NaN,
+    "n": 0
+   },
+   "noeff_W3.0": {
+    "win_rate": NaN,
+    "margin_mean": NaN,
+    "margin_min": NaN,
+    "n": 0
+   }
+  },
+  "profiles": {
+   "solver": {
+    "density": NaN,
+    "tpf": NaN,
+    "spf": NaN,
+    "last5_density": NaN,
+    "last5_tpf": NaN,
+    "food": NaN
+   },
+   "model": {
+    "density": NaN,
+    "tpf": NaN,
+    "spf": NaN,
+    "last5_density": NaN,
+    "last5_tpf": NaN,
+    "food": NaN
+   }
+  },
+  "model_food_mean": 38.025
+ },
+ "7h_best_vs_S2_common": {
+  "fitness": {
+   "cur_W0.5": {
+    "win_rate": 1.0,
+    "margin_mean": 0.14747014614970017,
+    "margin_min": 0.10984849326791135,
+    "n": 40
+   },
+   "ratio_W1.5": {
+    "win_rate": 1.0,
+    "margin_mean": 0.4172058266168405,
+    "margin_min": 0.28151398374074077,
+    "n": 40
+   },
+   "ratio_W3.0": {
+    "win_rate": 1.0,
+    "margin_mean": 0.8218093473175501,
+    "margin_min": 0.5390122194499867,
+    "n": 40
+   },
+   "tpf_W3.0": {
+    "win_rate": 1.0,
+    "margin_mean": 2.150284434149996,
+    "margin_min": 1.898520842671445,
+    "n": 40
+   },
+   "noeff_W3.0": {
+    "win_rate": 1.0,
+    "margin_mean": 0.8092070414014199,
+    "margin_min": 0.51499647141849,
+    "n": 40
+   }
+  },
+  "profiles": {
+   "solver": {
+    "density": 0.3072244099719749,
+    "tpf": 2.814682902628724,
+    "spf": 9.1739708798847,
+    "last5_density": 0.31200374368216244,
+    "last5_tpf": 3.34,
+    "food": 33.0
+   },
+   "model": {
+    "density": 0.8904036985085406,
+    "tpf": 13.023399899618976,
+    "spf": 14.596209118099756,
+    "last5_density": 0.8904566783681505,
+    "last5_tpf": 14.5,
+    "food": 33.0
+   }
+  },
+  "model_food_mean": 38.025
+ },
+ "7h_best_vs_S2_model": {
+  "fitness": {
+   "cur_W0.5": {
+    "win_rate": 1.0,
+    "margin_mean": 0.14370322428746288,
+    "margin_min": 0.10984849326791135,
+    "n": 24
+   },
+   "ratio_W1.5": {
+    "win_rate": 1.0,
+    "margin_mean": 0.40456671258351723,
+    "margin_min": 0.28151398374074077,
+    "n": 24
+   },
+   "ratio_W3.0": {
+    "win_rate": 1.0,
+    "margin_mean": 0.7958619450275973,
+    "margin_min": 0.5390122194499867,
+    "n": 24
+   },
+   "tpf_W3.0": {
+    "win_rate": 1.0,
+    "margin_mean": 2.1558345756386443,
+    "margin_min": 1.9293250274180807,
+    "n": 24
+   },
+   "noeff_W3.0": {
+    "win_rate": 1.0,
+    "margin_mean": 0.7825904648881613,
+    "margin_min": 0.51499647141849,
+    "n": 24
+   }
+  },
+  "profiles": {
+   "solver": {
+    "density": 0.31342228536594025,
+    "tpf": 2.854335136214763,
+    "spf": 9.180049631681166,
+    "last5_density": 0.3233989420322434,
+    "last5_tpf": 3.4333333333333336,
+    "food": 34.166666666666664
+   },
+   "model": {
+    "density": 0.8921311264855382,
+    "tpf": 13.465746983337624,
+    "spf": 15.081099211656218,
+    "last5_density": 0.8824630747763749,
+    "last5_tpf": 15.575000000000001,
+    "food": 34.166666666666664
+   }
+  },
+  "model_food_mean": 38.025
+ },
+ "7b_best_vs_S1_common": {
+  "fitness": {
+   "cur_W0.5": {
+    "win_rate": 0.5,
+    "margin_mean": 0.021038749804421643,
+    "margin_min": -0.4874999999999998,
+    "n": 10
+   },
+   "ratio_W1.5": {
+    "win_rate": 0.6,
+    "margin_mean": 0.1853783962690681,
+    "margin_min": -1.2374999999999998,
+    "n": 10
+   },
+   "ratio_W3.0": {
+    "win_rate": 0.6,
+    "margin_mean": 0.43188786596603795,
+    "margin_min": -2.3625000000000003,
+    "n": 10
+   },
+   "tpf_W3.0": {
+    "win_rate": 0.2,
+    "margin_mean": -0.2361310734279017,
+    "margin_min": -1.784210526315789,
+    "n": 10
+   },
+   "noeff_W3.0": {
+    "win_rate": 0.6,
+    "margin_mean": 0.49301893939393937,
+    "margin_min": -2.25,
+    "n": 10
+   }
+  },
+  "profiles": {
+   "solver": {
+    "density": 0.26925146667792177,
+    "tpf": 2.7,
+    "spf": 10.083333333333334,
+    "last5_density": 0.26702334996704646,
+    "last5_tpf": 2.6399999999999997,
+    "food": 1.7
+   },
+   "model": {
+    "density": 0.4919856459330143,
+    "tpf": 2.1166666666666667,
+    "spf": 3.8166666666666664,
+    "last5_density": 0.4956293706293707,
+    "last5_tpf": 2.0933333333333337,
+    "food": 1.7
+   }
+  },
+  "model_food_mean": 53.75
+ },
+ "7b_best_vs_S1_model": {
+  "fitness": {
+   "cur_W0.5": {
+    "win_rate": NaN,
+    "margin_mean": NaN,
+    "margin_min": NaN,
+    "n": 0
+   },
+   "ratio_W1.5": {
+    "win_rate": NaN,
+    "margin_mean": NaN,
+    "margin_min": NaN,
+    "n": 0
+   },
+   "ratio_W3.0": {
+    "win_rate": NaN,
+    "margin_mean": NaN,
+    "margin_min": NaN,
+    "n": 0
+   },
+   "tpf_W3.0": {
+    "win_rate": NaN,
+    "margin_mean": NaN,
+    "margin_min": NaN,
+    "n": 0
+   },
+   "noeff_W3.0": {
+    "win_rate": NaN,
+    "margin_mean": NaN,
+    "margin_min": NaN,
+    "n": 0
+   }
+  },
+  "profiles": {
+   "solver": {
+    "density": NaN,
+    "tpf": NaN,
+    "spf": NaN,
+    "last5_density": NaN,
+    "last5_tpf": NaN,
+    "food": NaN
+   },
+   "model": {
+    "density": NaN,
+    "tpf": NaN,
+    "spf": NaN,
+    "last5_density": NaN,
+    "last5_tpf": NaN,
+    "food": NaN
+   }
+  },
+  "model_food_mean": 53.75
+ },
+ "7b_best_vs_S2_common": {
+  "fitness": {
+   "cur_W0.5": {
+    "win_rate": 1.0,
+    "margin_mean": 0.14708476717480226,
+    "margin_min": 0.10351511962797133,
+    "n": 37
+   },
+   "ratio_W1.5": {
+    "win_rate": 1.0,
+    "margin_mean": 0.4233682080063863,
+    "margin_min": 0.290252824699337,
+    "n": 37
+   },
+   "ratio_W3.0": {
+    "win_rate": 1.0,
+    "margin_mean": 0.8377933692537642,
+    "margin_min": 0.5703593823063855,
+    "n": 37
+   },
+   "tpf_W3.0": {
+    "win_rate": 1.0,
+    "margin_mean": 2.0111580397941475,
+    "margin_min": 1.3312056443245464,
+    "n": 37
+   },
+   "noeff_W3.0": {
+    "win_rate": 1.0,
+    "margin_mean": 0.8288503224947548,
+    "margin_min": 0.560213115214097,
+    "n": 37
+   }
+  },
+  "profiles": {
+   "solver": {
+    "density": 0.30050606626410564,
+    "tpf": 3.214058131324313,
+    "spf": 10.723175354918316,
+    "last5_density": 0.30087335796157366,
+    "last5_tpf": 3.8270270270270275,
+    "food": 40.648648648648646
+   },
+   "model": {
+    "density": 0.8732227432622477,
+    "tpf": 13.304626516056068,
+    "spf": 15.184260006593574,
+    "last5_density": 0.8887042666178268,
+    "last5_tpf": 15.437837837837836,
+    "food": 40.648648648648646
+   }
+  },
+  "model_food_mean": 53.75
+ },
+ "7b_best_vs_S2_model": {
+  "fitness": {
+   "cur_W0.5": {
+    "win_rate": 1.0,
+    "margin_mean": 0.15749510154127844,
+    "margin_min": 0.14804729607360656,
+    "n": 8
+   },
+   "ratio_W1.5": {
+    "win_rate": 1.0,
+    "margin_mean": 0.46145373929050315,
+    "margin_min": 0.43221802239071394,
+    "n": 8
+   },
+   "ratio_W3.0": {
+    "win_rate": 1.0,
+    "margin_mean": 0.9173916959143433,
+    "margin_min": 0.8584741118663644,
+    "n": 8
+   },
+   "tpf_W3.0": {
+    "win_rate": 1.0,
+    "margin_mean": 1.8609898584657545,
+    "margin_min": 1.7297418284080877,
+    "n": 8
+   },
+   "noeff_W3.0": {
+    "win_rate": 1.0,
+    "margin_mean": 0.9118759132476795,
+    "margin_min": 0.8525121789513079,
+    "n": 8
+   }
+  },
+  "profiles": {
+   "solver": {
+    "density": 0.2813604490226231,
+    "tpf": 3.8150864140030256,
+    "spf": 13.60390209004613,
+    "last5_density": 0.20365806049429205,
+    "last5_tpf": 3.3,
+    "food": 56.875
+   },
+   "model": {
+    "density": 0.8853568394253292,
+    "tpf": 15.93078761538284,
+    "spf": 18.001080630357166,
+    "last5_density": 0.8970140062075076,
+    "last5_tpf": 18.1,
+    "food": 56.875
+   }
+  },
+  "model_food_mean": 53.75
+ }
+}
