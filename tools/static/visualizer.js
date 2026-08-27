@@ -878,8 +878,8 @@ function handleInit(msg) {
   const wantKey = S.urlModel || msg.meta.model_key;
   if (wantKey && [...sel.options].some(o => o.value === wantKey)) sel.value = wantKey;
 
-  // 面板文案随观测维度自适应
-  $("input-sub").textContent = msg.meta.OBS + " 维";
+  // 面板文案随观测维度/引擎自适应（7g 为曼哈顿度量观测）
+  $("input-sub").textContent = msg.meta.OBS + " 维" + (msg.meta.engine === "7g" ? " · 曼哈顿" : "");
   const hto = $("heatTabObs");
   if (hto) hto.textContent = "输入观测 " + msg.meta.OBS + " 行";
   buildIOPanels();
@@ -892,7 +892,8 @@ function handleInit(msg) {
   clearHistory();
   S.cur = null;
 
-  $("m-model").textContent = msg.meta.model;
+  $("m-model").textContent = msg.meta.engine && msg.meta.engine !== "einbrain"
+    ? msg.meta.engine + " · " + msg.meta.model : msg.meta.model;
   $("m-n").textContent = msg.meta.N;
   $("m-k").textContent = "K=" + msg.meta.FRAME_RATE + "·衰减" + msg.meta.INPUT_DECAY;
   $("m-food").textContent = msg.meta.food;

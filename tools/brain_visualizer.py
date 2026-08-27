@@ -17,6 +17,8 @@ test5a 最优模型 —— 贪吃蛇游玩 + 实时神经元活动可视化服�
 """
 
 import argparse
+import glob
+import importlib.util
 import json
 import math
 import os
@@ -51,8 +53,122 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 MODELS_DIR = os.path.join(REPO_ROOT, "models")
 DEFAULT_MODEL = os.path.join(MODELS_DIR, "test5a_best_model.pth")
 MODEL_FAST_PATH = os.path.join(MODELS_DIR, "test5d_best_model_33.pth")
+# 默认加载：优先最新版本的引擎模型（7g > 7d > 7c > 7b > 7a > 5a）
+DEFAULT_MODEL_KEY = next(
+    (key for key, fname in [("7g", "test7g_econ_best_model.pth"),
+                            ("7d", "test7d_econ_best_model.pth"),
+                            ("7c", "test7c_latest_gen_best.pth"),
+                            ("7b", "test7b_best_model.pth"),
+                            ("7a", "test7a_v5a_best_model.pth")]
+     if os.path.exists(os.path.join(REPO_ROOT, fname))), "5a")
 
 TOP_REC_EDGES = 140      # 拓扑图中展示的递归边 top-K 条数
+
+
+# ============================================================
+# 1b. test7 系进化引擎支持（GeneStack 张量格式）
+#     统一接口：module 提供 Config / GeneStack / forward_batch /
+#     update_fatigue / BatchedSnakeEnv / load_best_state
+#     新增版本（如 test7c）只需在 ENGINES 里加一行
+# ============================================================
+class Engine:
+    def __init__(self, name, module_file, detect):
+        self.name = name            # 引擎标识（写入 meta.engine）
+        self.module_file = module_file
+        self.detect = detect        # detect(cfg_dict) -> bool，基于 pth 内 config 专有字段判断归属
+        self._mod = None
+
+    def module(self):
+        """按需导入并缓存对应的训练脚本（仅用其类与函数，不执行 main）"""
+        if self._mod is None:
+            path = os.path.join(REPO_ROOT, self.module_file)
+            modname = os.path.splitext(self.module_file)[0] + "_viz"
+            spec = importlib.util.spec_from_file_location(modname, path)
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[modname] = mod
+            spec.loader.exec_module(mod)
+            self._mod = mod
+        return self._mod
+
+
+# 顺序即 detect 优先级：专有字段多的（新版本）放前面
+ENGINES = [
+    Engine("7g", "test7g.py", lambda c: "OBS_MANHATTAN" in c),
+    Engine("7d", "test7d.py",
+           lambda c: "TURN_COST" in c or "TURN_PENALTY" in c or
+                     "ONE_SIDED_TURN_DEATH" in c),
+    Engine("7c", "test7c.py",
+           lambda c: "FATIGUE_TURN_DECAY" in c or "FATIGUE_TURN_GAIN" in c),
+    Engine("7b", "test7b.py",
+           lambda c: "STARVE_SLOPE" in c or "FOOD_EFF_WEIGHT" in c),
+    Engine("7a", "test7a.py",
+           lambda c: "OBS_MODE" in c or "EVAL_BATCH" in c),
+]
+
+# 内置快捷 key -> 默认模型文件名（不存在时回落到扫描到的第一个）
+ENGINE_DEFAULT_FILE = {
+    "7a": "test7a_v5a_best_model.pth",
+    "7b": "test7b_best_model.pth",
+    "7c": "test7c_latest_gen_best.pth",
+    "7d": "test7d_econ_best_model.pth",
+    "7g": "test7g_econ_best_model.pth",
+}
+
+
+def detect_engine(path):
+    """读取 pth 的 config dict，按 ENGINES 顺序匹配归属引擎；失败返回 None"""
+    try:
+        data = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception:
+        return None
+    cfgd = data.get("config", {}) or {}
+    for eng in ENGINES:
+        if eng.detect(cfgd):
+            return eng
+    return None
+
+
+class BrainGeneAdapter:
+    """把 test7 系 GeneStack 单个体包装成 compute_layout 所需的 brain 接口"""
+    is_gene_engine = True
+
+    def __init__(self, pop, t7cfg, engine):
+        self.pop = pop
+        self.t7cfg = t7cfg
+        self.engine = engine
+        self.N = int(pop.N)
+        self.obs_dim = int(pop.O)
+        self.action_dim = int(pop.A)
+        with torch.no_grad():
+            self.M_in = pop.M_in[0].float().cpu()
+            self.M_rec = pop.M_rec[0].float().cpu()
+            self.M_out = pop.M_out[0].float().cpu()
+            self.W_in = pop.W_in[0].float().cpu()
+            self.W_rec = pop.W_rec[0].float().cpu()
+            self.W_out = pop.W_out[0].float().cpu()
+            self.b_out = pop.b_out[0].float().cpu()
+            self.tau_e_init = pop.tau_e[0].float().cpu()
+
+
+def load_gene_model(path, engine):
+    """加载 test7 系最优模型 → (BrainGeneAdapter, cfg, food, steps)"""
+    mod = engine.module()
+    data = torch.load(path, map_location="cpu", weights_only=False)
+    cfg = mod.Config()
+    for k, v in (data.get("config", {}) or {}).items():
+        if not k.startswith("__"):
+            setattr(cfg, k, v)
+    cfg.DEVICE = "cpu"      # 可视化单个体，CPU 足够；fp32 与训练评估差异可忽略
+    cfg.USE_FP16 = False
+    res = mod.load_best_state(path, cfg)
+    if res is None:
+        raise RuntimeError("test7 系模型加载失败: " + path)
+    st, food, steps = res
+    pop = mod.GeneStack(cfg, B=1, device=torch.device("cpu"))
+    pop.random_init()
+    pop.set_individual_from_state(0, st)
+    pop.refresh_eff()
+    return BrainGeneAdapter(pop, cfg, engine), cfg, float(food), float(steps)
 
 
 # ============================================================
@@ -71,20 +187,50 @@ def make_cfg_from_dict(cfg_dict):
     return tmp
 
 
+def available_models():
+    """模型下拉框枚举：内置 5a/fast + 自动扫描根目录所有 test7 系最优模型"""
+    models = [("5a", "5a 最优 (256)"), ("fast", "5d 最优 (256)")]
+    for p in sorted(glob.glob(os.path.join(REPO_ROOT, "test7*_best*.pth"))):
+        name = os.path.basename(p)
+        models.append((name, name))
+    return models
+
+
 def resolve_model_path(key):
-    """'fast' -> 旧版 test5_fast 256 柱模型；其他（'5a'/''）-> 默认 test5a 256 柱模型"""
+    """内置 key（5a/fast/7a/7b）→ 默认模型；其他 → 根目录文件名或绝对路径"""
     if key == "fast":
         return MODEL_FAST_PATH
+    if key in ENGINE_DEFAULT_FILE:
+        fname = ENGINE_DEFAULT_FILE[key]
+        path = os.path.join(REPO_ROOT, fname)
+        if os.path.exists(path):
+            return path
+        # 默认文件不存在 → 回落到扫描到的该引擎首个模型
+        cands = sorted(glob.glob(os.path.join(
+            REPO_ROOT, os.path.splitext(next(e.module_file for e in ENGINES
+                                             if e.name == key))[0] + "*_best*.pth")))
+        if cands:
+            return cands[0]
+        return path
+    if key not in ("", "5a"):
+        if os.path.isabs(key) and os.path.exists(key):
+            return key
+        cand = os.path.join(REPO_ROOT, key)
+        if os.path.exists(cand):
+            return cand
     return DEFAULT_MODEL
 
 
 def load_model(path):
-    """加载 pth 最优模型，返回 (brain, cfg, food, steps)"""
+    """加载 pth 最优模型，返回 (brain, cfg, food, steps)；自动识别 test7 系引擎格式"""
+    engine = detect_engine(path)
+    if engine is not None:
+        return load_gene_model(path, engine)
     data = torch.load(path, map_location="cpu", weights_only=False)
     cfg = make_cfg_from_dict(data.get("config", {}))
     result = einbrain.io.load_best_model_brain(path, cfg)
     if result is None:
-        raise RuntimeError("模型加载失败: " + path)
+        raise RuntimeError("模型加载失败（非 test7 系且非 einbrain 格式）: " + path)
     brain, food, steps = result
     return brain, cfg, float(food), float(steps)
 
@@ -269,10 +415,11 @@ def compute_layout(brain, cfg):
 # 3. 全局状态
 # ============================================================
 class GlobalState:
-    def __init__(self, model_path):
+    def __init__(self, model_path, model_key=None):
         self.lock = threading.RLock()
         self.cond = threading.Condition(self.lock)
         self.model_path = os.path.abspath(model_path)
+        self.model_key = model_key or os.path.basename(model_path)
         self.brain = None
         self.cfg = None
         self.model_info = {}
@@ -295,6 +442,9 @@ class GlobalState:
             self.layout = compute_layout(brain, cfg)
             self.model_info = {
                 "model": os.path.basename(self.model_path),
+                "model_key": self.model_key,
+                "engine": getattr(self.brain, "engine", None) and self.brain.engine.name or "einbrain",
+                "is7a": bool(getattr(self.brain, "is_gene_engine", False)),
                 "N": int(brain.N),
                 "OBS": int(cfg.OBS_DIM),
                 "ACTION": int(cfg.ACTION_DIM),
@@ -310,15 +460,17 @@ class GlobalState:
                 "type": "init",
                 "layout": self.layout,
                 "meta": self.model_info,
+                "models": available_models(),
                 "episode": self.episode,
             }
             self.init_payload = json.dumps(payload, separators=(",", ":")).encode("utf-8")
             self.version += 1
             self.request_new = True
 
-    def load_state_raw(self, path):
+    def load_state_raw(self, path, key=None):
         """无条件重载模型（切换模型时）"""
         self.model_path = os.path.abspath(path)
+        self.model_key = key or os.path.basename(path)
         self.load_state()
         return True
 
@@ -396,7 +548,7 @@ def _run_episode(state, brain, cfg, episode):
         action, avg_logits, E, I = deliberate_action(brain, obs, E, I)
         brain.update_fatigue(action)
 
-        next_obs, ate, done = env.step(action)
+        next_obs, ate, done, _truncated = env.step(action)
         if ate:
             score += 1
         steps += 1
@@ -414,6 +566,108 @@ def _run_episode(state, brain, cfg, episode):
         time.sleep(0.12 / speed)
 
     # 局结束：短暂停留，让前端显示完成态
+    time.sleep(0.35)
+    return True
+
+
+def _run_episode_gene(state, brain, cfg, episode):
+    """test7 系对局：用对应引擎自己的 BatchedSnakeEnv + E-I 动力学（CPU 单个体），
+    保证与训练评估的动力学完全一致；返回 True=正常结束 / False=被中断"""
+    mod = brain.engine.module()
+    pop = brain.pop
+    t7cfg = brain.t7cfg
+    dev = pop.device
+    N = brain.N
+    env = mod.BatchedSnakeEnv(t7cfg, 1, dev)
+    E = torch.zeros(1, N, device=dev)
+    I = torch.zeros(1, N, device=dev)
+    st = torch.zeros(1, N, device=dev)
+    # 疲劳/压力状态形态按引擎接口自适应：
+    #   7a/7b: cts [B,A] 逐动作连续计数（update_fatigue(cts, action)）
+    #   7c:    press [B] 转向压力标量（forward_batch 第 6 参数名为 press）
+    # 疲劳衰减与引擎配置一致（默认 0.7 会弱化 7g 的 0.9 疲劳，显示行为失真）
+    _fat_decay = float(getattr(t7cfg, "FATIGUE_TURN_DECAY", 0.7))
+    import inspect as _inspect
+    _fat_param = list(_inspect.signature(mod.forward_batch).parameters)[5]
+    press_mode = (_fat_param == "press")
+    cts = (torch.zeros(1, device=dev) if press_mode
+           else torch.zeros(1, brain.action_dim, device=dev))
+    done = False
+    steps = 0
+    score = 0
+    zeros_hormone = [0.0] * N
+
+    while not done:
+        with state.cond:
+            if state.version != episode[0] or state.request_new:
+                state.request_new = False
+                return False
+            if state.paused:
+                state.cond.wait_for(
+                    lambda: not state.paused or state.request_new or state.version != episode[0],
+                    timeout=0.2)
+                if state.request_new or state.version != episode[0]:
+                    state.request_new = False
+                    return False
+                if state.paused:
+                    continue
+            speed = state.speed
+
+        with torch.no_grad():
+            obs = env.obs()
+            # K 倍帧率思考（与 deliberate_batch 相同流程，额外保留平均 logits 供展示）
+            K = t7cfg.FRAME_RATE
+            logits_sum = None
+            for k in range(K):
+                o = obs * (t7cfg.INPUT_DECAY ** k)
+                logits, E, I, st = mod.forward_batch(pop, o, E, I, st, cts, t7cfg)
+                logits_sum = logits if logits_sum is None else logits_sum + logits
+            avg_logits = logits_sum / K
+            action_t = torch.argmax(logits_sum, dim=1)
+            action = int(action_t[0])
+            if press_mode:
+                cts = mod.update_fatigue(cts, action_t, decay=_fat_decay)
+            else:
+                cts = mod.update_fatigue(cts, action_t)
+            env.step(action_t)
+            ate = bool(env.ate[0])
+            done = not bool(env.alive[0])
+            tau_eff = (pop.tau_e + t7cfg.SHORT_TERM_GAIN * st).clamp(
+                t7cfg.TAU_E_MIN, t7cfg.TAU_E_MAX)
+            # press 模式：转向压力只作用于左右转 logits，前端按 [Fwd,Left,Right] 显示
+            fatigue_view = ([0.0, float(cts[0]), float(cts[0])] if press_mode
+                            else _round_list(cts[0]))
+            frame = {
+                "type": "frame",
+                "obs": obs[0].tolist(),
+                "action": action,
+                "logits": _round_list(avg_logits[0]),
+                "fatigue": fatigue_view,
+                "E": _round_list(E[0]),
+                "I": _round_list(I[0]),
+                "hormone_ex": zeros_hormone,   # test7a 无激素支路，填零保持帧格式兼容
+                "hormone_in": zeros_hormone,
+                "tau": _round_list(tau_eff[0]),
+                "body": [[int(seg[0]), int(seg[1])] for seg in env.body[0, :env.body_len[0]]],
+                "food": [int(env.food[0, 0]), int(env.food[0, 1])],
+                "dir": [int(env.DIRS[env.dir_idx[0]][0]), int(env.DIRS[env.dir_idx[0]][1])],
+                "score": int(score),
+                "steps": int(steps),
+                "done": bool(done),
+                "episode": int(state.episode),
+            }
+        if ate:
+            score += 1
+            frame["score"] = int(score)
+        steps += 1
+
+        with state.cond:
+            state.latest_frame = frame
+            state.frame_id += 1
+            state.cond.notify_all()
+
+        time.sleep(0.12 / speed)
+
     time.sleep(0.35)
     return True
 
@@ -436,7 +690,10 @@ def game_loop(state):
             episode = state.episode
 
         try:
-            ok = _run_episode(state, my_brain, my_cfg, episode_marker)
+            if getattr(my_brain, "is_gene_engine", False):
+                ok = _run_episode_gene(state, my_brain, my_cfg, episode_marker)
+            else:
+                ok = _run_episode(state, my_brain, my_cfg, episode_marker)
         except Exception:
             traceback.print_exc()
             print("[GameLoop] 单局异常，1 秒后重开新局")
@@ -510,7 +767,7 @@ class Handler(BaseHTTPRequestHandler):
         path = resolve_model_path(model_key)
         with state.cond:
             if os.path.abspath(path) != state.model_path:
-                state.load_state_raw(path)
+                state.load_state_raw(path, key=model_key or None)
             payload = state.init_payload
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -588,17 +845,17 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="test5a 贪吃蛇脑活动可视化")
+    parser = argparse.ArgumentParser(description="贪吃蛇脑活动可视化（test5a / test7a）")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--model", choices=["5a", "fast"], default="5a",
-                        help="默认加载的模型（5a=test5a最优 / fast=test5_fast旧版），运行中也可在页面切换")
+    parser.add_argument("--model", default=DEFAULT_MODEL_KEY,
+                        help="7a=test7a_v5最优 / 5a / fast，或根目录下任意 test7a*_best*.pth 文件名 / 绝对路径")
     parser.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
     args = parser.parse_args()
 
     path = resolve_model_path(args.model)
     print("[Init] 加载最优模型: " + os.path.basename(path))
     t0 = time.perf_counter()
-    state.__init__(path)  # 重新初始化全局状态
+    state.__init__(path, model_key=args.model)  # 重新初始化全局状态
     print("[Init] 模型与拓扑布局计算完成: {:.1f}s | N={} OBS={} Food={} Steps={}".format(
         time.perf_counter() - t0, state.model_info["N"], state.model_info["OBS"],
         state.model_info["food"], state.model_info["steps"]))
@@ -637,7 +894,7 @@ def main():
 
 
 # 全局状态（模块级单例）
-state = GlobalState(DEFAULT_MODEL)
+state = GlobalState(DEFAULT_MODEL, model_key="5a")
 
 if __name__ == "__main__":
     main()

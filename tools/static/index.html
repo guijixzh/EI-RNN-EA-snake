@@ -194,7 +194,7 @@
     </div>
 
     <div class="card" id="input-card">
-      <div class="card-title">③ 实时输入观测 <span class="sub">24 维</span></div>
+      <div class="card-title">③ 实时输入观测 <span class="sub" id="input-sub">24 维</span></div>
       <div id="input-body">
         <div class="io-group">
           <div class="g-label"><span>食物方向</span><span id="g-fdir" style="color:#3fb950">--</span></div>
@@ -241,7 +241,7 @@
       <div class="card-title">④⑥ 实时热力图监控 <span class="sub">最近 150 步 · 点击下方子选项独占查看</span></div>
       <div id="heat-tabs">
         <span class="ht-label">子选项:</span>
-        <button data-heat="obs" class="active">输入观测 24 行</button>
+        <button data-heat="obs" class="active" id="heatTabObs">输入观测 24 行</button>
         <button data-heat="E">柱活动 E</button>
         <button data-heat="tau">有效 τ_eff</button>
         <button data-heat="ex">兴奋激素</button>

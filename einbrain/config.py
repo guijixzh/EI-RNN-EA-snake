@@ -30,6 +30,20 @@ class Config:
     EVO_COS_PERIOD = 100
     EVO_DYN_DECAY_TAU = 33
 
+    # ==================== 真正 NEAT 进化参数（test8）====================
+    # 创新号 / 物种化 / 历史标记交叉（见 einbrain.neat）
+    COMPAT_THRESHOLD_INIT = 1.5     # 初始相容性阈值（自适应调整；随机初始对距离约 1.7）
+    COMPAT_C1 = 1.0                 # excess 系数
+    COMPAT_C2 = 1.0                 # disjoint 系数
+    COMPAT_C3 = 0.4                 # 权重差系数
+    SPECIES_TARGET = 8              # 目标物种数（阈值自适应锚点）
+    SPECIES_ELITE = 1               # 每物种保底精英数
+    SPECIES_CAP = 64                # 全量再物种化物种数硬上限（防 O(POP²) 复发）
+    RE_SPECIATE_INTERVAL = 5        # 每 N 代全量再物种化；其余代后代继承父本物种
+    ADD_CONN_PROB = 0.6             # add-connection 相对概率
+    ADD_NODE_PROB = 0.3             # add-node 相对概率（其余为 disable）
+    REENABLE_PROB = 0.1             # 重新启用被禁用连接的概率
+
     # --- 激素网络（G3）---
     TRAIN_HORMONE_NET = False      # False = 保持 0 初始化，G3 永久冻结
     HORMONE_GATE_THRESHOLD = 0.0   # 单柱释放门控：最大 logit 严格 > 阈值才释放

@@ -1,19 +1,18 @@
 # ==========================================
-# test7.py —— GPU 全并行进化版（无激素 EI-RNN）
+# test7f.py —— 疲劳脚手架退火版（基于 test7e）
 #
-# 相对 test5d（CPU 多进程 + 逐个体 nn.Module）的核心改造：
-#  1. 基因型张量化：整个种群堆叠为一批 GPU 张量（[POP, N, N] 等），
-#     交叉/变异全部向量化，一次前向同时评估 2048 个大脑。
-#  2. 无激素：直接删除激素支路（test5d 默认激素权重恒 0，删除后动力学完全一致）。
-#  3. 环境向量化：蛇头/身体/食物/射线观测全部为 GPU 张量状态，
-#     一整代种群并行跑在同一批环境里，无 Python 逐个体循环。
-#  4. 显存自适应：按显存自动分块（EVAL_BATCH=0 自动估算），不 OOM。
-#  5. 语义与 test5d 完全对齐：
-#     - K 倍帧率思考（FRAME_RATE 次内部迭代 + 输入衰减）
-#     - (food, seen, unseen) 三元组 + LONG_SNAKE_SCORE_THRESHOLD 排序切换
-#     - 单侧转弯判死 / 饥饿截断 / 动作疲劳 / 短期 tau 调制
-#     - CYCLE_PATTERN 交替冻结（默认 G1+G2 全激活）
-#     - 断点续训 / 种子继承（从 test5d/test6 最优模型注入）
+# 疲劳扫描结论（test7e_fatigue_scan.py）：
+#  - 疲劳是转向密度的唯一有效压制者（适应度计价 20 代压不动密度）；
+#  - test7d 系大脑未内化转弯纪律：摘掉疲劳密度→0.996、吃子→4.5，
+#    策略+疲劳复合体才是被选择单位，疲劳成了常驻拐杖；
+#  - 密度 0.82→0.63 区间吃子几乎免费（61→58），<0.5 才崩盘。
+#
+# 相对 test7e 的改动：
+#  1. 疲劳增益按代退火：gain_t = max(FLOOR, GAIN·ANNEAL_FACTOR^(gen//PERIOD))，
+#     默认每 20 代 ×0.7、下限 0.05——逐步撤除脚手架，逼大脑内化转弯纪律；
+#     适应度（整局转弯计价）继续提供下探密度的选择压力。
+#  2. 路径 test7f_*，种子默认 test7e_econ_best_model.pth。
+# 其余（滞回开关默认关 / 饿死斜率 3 / econ 成本）与 test7e 一致。
 # ==========================================
 
 import argparse
@@ -50,14 +49,46 @@ class Config:
 
     # --- 环境参数 ---
     GRID_SIZE = 10
-    EVAL_EPISODES = 5
-    MAX_STEPS = 500
+    EVAL_EPISODES = 10
+    MAX_STEPS = 100000
 
-    # --- 脑结构参数（与 test5d 完全一致，保证种子可加载）---
+    # --- 脑结构参数（OBS_MODE 决定 OBS_DIM：'24'=test7 射线观测 | '32proj'=32维投影观测）---
     NUM_COLUMNS = 256
-    OBS_DIM = 24
+    OBS_MODE = '32proj'
+    OBS_DIM = 24 if OBS_MODE == '24' else 32
     ACTION_DIM = 3
     INIT_DENSITY = 0.15
+
+    # --- 适应度模式：'econ'=乘法经济学 | 'additive'=加法惩罚 | 'tuple'=元组字典序 ---
+    FIT_MODE = 'econ'
+
+    # --- econ 臂参数 ---
+    TURN_COST = 1.0     # 整局每单次转向折算的步数成本
+    STEP_REF = 10.0     # 每颗食物的参考步数（10x10 盘均食距量级）
+    CROWD_W = 0.0       # 拥挤加权：转向成本 × (1 + CROWD_W·food/50)，0=关
+
+    # --- 滞回解码（诊断显示转向边际均值 6.9，默认关闭）---
+    TURN_MARGIN = 0.0
+
+    # --- additive 臂参数 ---
+    FOOD_EFF_WEIGHT = 0.3
+    TURN_PENALTY = 3.0  # 转向占比线性扣分权重
+
+    # --- 单侧转弯判死（默认关闭：早期随机个体普遍摇头，判罚干扰初期筛选）---
+    ONE_SIDED_TURN_DEATH = False
+
+    # --- 饿死斜率：steps_wo_food > STARVE_SLOPE*len + 20 ---
+    STARVE_SLOPE = 3.0
+
+    # --- 食物扇区信号幅度（仅 32proj 模式）---
+    # 诊断实验证明：投影值 0.05-0.25 过弱，随机 W_in 无法产生"看见食物→转向"反射，
+    # 随机种群 BestFood 仅 0.8；×4 追平 24 维(2.6)，×8 反超(3.6)。
+    OBS_FOOD_SCALE = 8.0
+
+    # 自身/障碍扇区幅度：块可读性化验+三臂对照验证（30代 BestFood 8.8→20.8），
+    # 放大后进化可读这些块，EliteFood 4.1→10.9，自撞死亡下降。
+    OBS_SELF_SCALE = 8.0
+    OBS_OBSTACLE_SCALE = 8.0
 
     # --- E-I 动力学参数 ---
     BASE_TAU_E = 0.7
@@ -77,10 +108,12 @@ class Config:
     SHORT_TERM_GAIN = -0.2
     SHORT_TERM_DECAY = 0.3
 
-    # --- 动作疲劳 ---
-    FATIGUE_GAIN = 1e-5
-    FATIGUE_THRESHOLD = 4
-    FATIGUE_MAX = 5.0
+    # --- 转向疲劳（脚手架退火）---
+    FATIGUE_TURN_GAIN = 0.2          # 初始增益（第 0 个周期）
+    FATIGUE_TURN_DECAY = 0.9
+    ANNEAL_PERIOD = 20               # 每 N 代降一档
+    ANNEAL_FACTOR = 0.7              # 降档乘子
+    FATIGUE_FLOOR = 0.05             # 增益下限（保留微弱先验，不彻底归零）
 
     # --- K 倍帧率思考 ---
     FRAME_RATE = 5
@@ -100,13 +133,14 @@ class Config:
     PRINT_HISTORY_EVERY = 1
 
     # --- 断点 / 最优模型 / 种子 ---
-    CHECKPOINT_PATH = 'test7_checkpoint.pth'
-    BEST_MODEL_PATH = 'test7_best_model.pth'
+    CHECKPOINT_PATH = 'test7f_econ_checkpoint.pth'
+    BEST_MODEL_PATH = 'test7f_econ_best_model.pth'
+    LATEST_GEN_BEST_MODEL_PATH = 'test7f_econ_latest_gen_best.pth'
     AUTO_RESUME = True
-    CHECKPOINT_INTERVAL = 5
-    SEED_FROM_BEST = True
-    SEED_MODEL_PATH = 'test5d_best_model.pth'
-    SEED_MODEL_PATH2 = 'test6_best_model.pth'   # 备选种子路径
+    CHECKPOINT_INTERVAL = 10
+    SEED_FROM_BEST = False
+    SEED_MODEL_PATH = 'test7e_econ_best_model.pth'
+    SEED_MODEL_PATH2 = 'test7e_econ_latest_gen_best.pth'
 
 
 # ==========================================
@@ -135,10 +169,55 @@ def _freeze_active_groups(gen, cfg):
     return frozenset(active)
 
 
-def _selection_key(food, seen, unseen, threshold):
+def _fitness_econ(m, cfg):
+    """乘法经济学适应度（整局转弯计价版）：
+    turns_total = 整局转向数（含死亡前挣扎，m[8]+m[9]）
+    cost = steps_last + TURN_COST·(1+CROWD_W·food/50)·turns_total
+    fitness = food * min(STEP_REF*food/max(cost,1), 1)
+    steps 只计到最后一食（不奖励快死）；挣扎摆动与长蛇期摆动同样计价。
+    """
+    if m[1] >= 99999:
+        return -1e9
+    food, steps_last = m[0], m[3]
+    turns_total = m[8] + m[9]
+    crowd = 1.0 + float(getattr(cfg, 'CROWD_W', 0.0)) * food / 50.0
+    cost = steps_last + float(getattr(cfg, 'TURN_COST', 1.0)) * crowd * turns_total
+    economy = float(getattr(cfg, 'STEP_REF', 10.0)) * food / max(cost, 1.0)
+    return food * min(economy, 1.0)
+
+
+def _fitness_additive(m, cfg):
+    """加法惩罚适应度：food + w*food/steps_last - TURN_PENALTY*turn_ratio
+    turn_ratio = 每局转向数/每局步数（摆动率）。
+    """
+    if m[1] >= 99999:
+        return -1e9
+    food, steps_last = m[0], m[3]
+    eff = food / max(steps_last, 1.0)
+    turn_ratio = (m[8] + m[9]) / max(m[1] + m[2], 1.0)
+    return (food + float(getattr(cfg, 'FOOD_EFF_WEIGHT', 0.3)) * eff
+            - float(getattr(cfg, 'TURN_PENALTY', 3.0)) * turn_ratio)
+
+
+def _fitness_tuple(m, cfg):
+    """test7 原版元组字典序排序键。"""
+    if m[1] >= 99999:
+        return (-1e9, 0, 0)
+    threshold = float(getattr(cfg, 'LONG_SNAKE_SCORE_THRESHOLD', 3.0))
+    food, seen, unseen = m[0], m[1], m[2]
     if food > threshold:
         return (food, unseen, -seen)
     return (food, -seen, unseen)
+
+
+def _make_key_fn(cfg):
+    """返回行向量排序键函数 key(m)，m 为 _eval_chunk 输出的单行指标。"""
+    mode = getattr(cfg, 'FIT_MODE', 'econ')
+    if mode == 'tuple':
+        return lambda m: _fitness_tuple(m, cfg)
+    if mode == 'additive':
+        return lambda m: _fitness_additive(m, cfg)
+    return lambda m: _fitness_econ(m, cfg)
 
 
 def _auto_eval_batch(cfg, device):
@@ -343,6 +422,7 @@ class BatchedSnakeEnv:
         self.G = cfg.GRID_SIZE
         self.MAXLEN = self.G * self.G
         self.DIRS = _make_dirs(device)
+        self.mode24 = (getattr(cfg, 'OBS_MODE', '32proj') == '24')
         self.reset()
 
     # ---------- 重置 ----------
@@ -360,6 +440,7 @@ class BatchedSnakeEnv:
         self.steps = torch.zeros(B, dtype=torch.long, device=dev)
         self.steps_wo_food = torch.zeros(B, dtype=torch.long, device=dev)
         self.ate = torch.zeros(B, dtype=torch.bool, device=dev)
+        self.died = torch.zeros(B, dtype=torch.long, device=dev)   # 0存活 1撞墙 2撞己 3饿死
 
     def _place_food_init(self):
         dev = self.device
@@ -417,11 +498,17 @@ class BatchedSnakeEnv:
         occ.scatter_add_(1, flat.clamp(max=G * G - 1), valid.float())
         return occ
 
-    # ---------- 观测 ----------
+    # ---------- 观测（按 OBS_MODE 分发）----------
     def obs(self):
+        if self.mode24:
+            return self._obs24()
+        return self._obs32()
+
+    def _obs24(self):
+        """24 维观测：逐通道照抄 test7.py obs()（食物投影bit/距离/5射线/8身体桶/尾投影）。"""
         B, G, dev = self.B, self.G, self.device
         head, food = self.head, self.food
-        d = self.DIRS[self.dir_idx]                       # [B,2]
+        d = self.DIRS[self.dir_idx]
         dx = food[:, 0] - head[:, 0]
         dy = food[:, 1] - head[:, 1]
         left = self.DIRS[(self.dir_idx + 3) % 4]
@@ -458,15 +545,128 @@ class BatchedSnakeEnv:
         valid &= (torch.arange(self.MAXLEN, device=dev)[None, :] > 0)
         close = torch.where(valid, close, torch.zeros_like(close))
         for k in range(8):
-            m = (bucket == k) & valid
-            obs[:, 14 + k] = (close * m).max(dim=1).values
+            m_ = (bucket == k) & valid
+            obs[:, 14 + k] = (close * m_).max(dim=1).values
 
         # --- 尾巴 22:24 ---
-        tail = self.body[torch.arange(B, device=dev), (self.body_len - 1).clamp(min=0)]
+        ar = torch.arange(B, device=dev)
+        tail = self.body[ar, (self.body_len - 1).clamp(min=0)]
         twx = tail[:, 0] - head[:, 0]
         twy = tail[:, 1] - head[:, 1]
         obs[:, 22] = (twx * d[:, 0] + twy * d[:, 1]).float() / G
         obs[:, 23] = (-twx * d[:, 1] + twy * d[:, 0]).float() / G
+
+        return obs
+
+    def _obs32(self):
+        """32 维投影观测（食物扇区投影式连续感知）。"""
+        B, G, dev = self.B, self.G, self.device
+        head = self.head
+        food = self.food
+        d = self.DIRS[self.dir_idx]                       # [B,2]
+
+        obs = torch.zeros(B, 32, dtype=torch.float32, device=dev)
+
+        # --- [0:4] 蛇首方向 one-hot（绝对 4 基本方向）---
+        # DIRS = [(0,1), (1,0), (0,-1), (-1,0)] -> idx 0,1,2,3
+        obs[:, 0] = ((d[:, 0] == 0) & (d[:, 1] == 1)).float()  # 右
+        obs[:, 1] = ((d[:, 0] == 1) & (d[:, 1] == 0)).float()  # 下
+        obs[:, 2] = ((d[:, 0] == 0) & (d[:, 1] == -1)).float() # 左
+        obs[:, 3] = ((d[:, 0] == -1) & (d[:, 1] == 0)).float() # 上
+
+        # --- [4:8] 蛇尾方向 one-hot ---
+        tail = self.body[torch.arange(B, device=dev), (self.body_len - 1).clamp(min=0)]
+        prev = self.body[torch.arange(B, device=dev), (self.body_len - 2).clamp(min=0)]
+        tail_dr = prev[:, 0] - tail[:, 0]
+        tail_dc = prev[:, 1] - tail[:, 1]
+        obs[:, 4] = ((tail_dr == 0) & (tail_dc == 1)).float()   # 右
+        obs[:, 5] = ((tail_dr == 1) & (tail_dc == 0)).float()   # 下
+        obs[:, 6] = ((tail_dr == 0) & (tail_dc == -1)).float()  # 左
+        obs[:, 7] = ((tail_dr == -1) & (tail_dc == 0)).float()  # 上
+
+        # --- 计算 8 个相对方向 ---
+        # 相对方向：[前, 左前, 左, 左后, 后, 右后, 右, 右前]
+        left = self.DIRS[(self.dir_idx + 3) % 4]
+        right = self.DIRS[(self.dir_idx + 1) % 4]
+        d8 = [
+            d,                           # 0 前
+            d + left,                    # 1 左前
+            left,                        # 2 左
+            left - d,                    # 3 左后
+            -d,                          # 4 后
+            right - d,                   # 5 右后（d-left 恒等于 d+right=右前，从未扫过右后）
+            right,                       # 6 右
+            d + right,                   # 7 右前
+        ]
+
+        # --- [8:16] 食物 8 扇区投影式连续感知（忽略遮蔽，永远可见）---
+        # channel_i = OBS_FOOD_SCALE * max(0, v·û_i) / |v|² = K·max(0, cosθ)/dist
+        # 幅度缩放 K：随机权重下投影信号需足够强才能触发转向反射（见 Config 注释）
+        ar = torch.arange(B, device=dev)
+        vr = (food[:, 0] - head[:, 0]).float()
+        vc = (food[:, 1] - head[:, 1]).float()
+        d2 = (vr * vr + vc * vc).clamp(min=1.0)           # |v|²，食物不在头上故 >= 1
+        k_scale = float(getattr(self.cfg, 'OBS_FOOD_SCALE', 1.0))
+        for i in range(8):
+            dx = d8[i][:, 0].float()
+            dy = d8[i][:, 1].float()
+            norm = torch.sqrt(dx * dx + dy * dy)           # 1 或 √2（逐个体朝向）
+            dot = (vr * dx + vc * dy) / norm
+            obs[:, 8 + i] = torch.clamp(dot, min=0.0) / d2 * k_scale
+
+        # --- [16:24] 自身 8 扇区距离倒数 ---
+        # 身体掩码向量化（与 _occupancy_flat 同技巧；scatter_add 累加语义保证重复/填充索引幂等，
+        # 已用蛇长2-20随机自回避蛇身验证与逐个体循环逐位一致）
+        flat_body = self.body[:, :, 0] * G + self.body[:, :, 1]
+        seg_idx = torch.arange(self.MAXLEN, device=dev)
+        seg_valid = (seg_idx[None, :] >= 1) & (seg_idx[None, :] < self.body_len[:, None])
+        bf = torch.zeros(B, G * G, dtype=torch.long, device=dev)
+        bf.scatter_add_(1, flat_body.clamp(max=G * G - 1), seg_valid.long())
+        body_set_mask = bf.view(B, G, G) > 0
+
+        for i in range(8):
+            ddr, ddc = d8[i][:, 0], d8[i][:, 1]
+            dist = torch.full((B,), float(G + 1), device=dev)
+            prev_ok = torch.ones(B, dtype=torch.bool, device=dev)
+            for k in range(1, G + 1):
+                r = head[:, 0] + ddr * k
+                c = head[:, 1] + ddc * k
+                inb = (r >= 0) & (r < G) & (c >= 0) & (c < G)
+                r_clamp = r.clamp(0, G - 1)
+                c_clamp = c.clamp(0, G - 1)
+                hit_body = body_set_mask[ar, r_clamp, c_clamp] & inb
+                dist = torch.where(prev_ok & hit_body,
+                                   torch.full_like(dist, float(k)), dist)
+                prev_ok = prev_ok & (~hit_body) & inb
+            obs[:, 16 + i] = torch.where(dist <= G, 1.0 / dist, torch.zeros_like(dist))
+        k_self = float(getattr(self.cfg, 'OBS_SELF_SCALE', 1.0))
+        if k_self != 1.0:
+            obs[:, 16:24] = obs[:, 16:24] * k_self
+
+        # --- [24:32] 障碍 8 扇区距离倒数 ---
+        for i in range(8):
+            ddr, ddc = d8[i][:, 0], d8[i][:, 1]
+            dist = torch.full((B,), float(G), device=dev)
+            prev_ok = torch.ones(B, dtype=torch.bool, device=dev)
+            for k in range(1, G + 1):
+                r = head[:, 0] + ddr * k
+                c = head[:, 1] + ddc * k
+                inb = (r >= 0) & (r < G) & (c >= 0) & (c < G)
+                r_clamp = r.clamp(0, G - 1)
+                c_clamp = c.clamp(0, G - 1)
+                hit_wall = ~inb
+                hit_body = body_set_mask[ar, r_clamp, c_clamp] & inb
+                blocked = hit_wall | hit_body
+                dist = torch.where(prev_ok & blocked,
+                                   torch.full_like(dist, float(k)), dist)
+                prev_ok = prev_ok & (~blocked)
+            obs[:, 24 + i] = 1.0 / dist
+
+        # 身后约定：障碍数 = sqrt(蛇身长度/格子度)
+        obs[:, 28] = torch.sqrt(self.body_len.float().clamp(min=1)/self.G)
+        k_obs = float(getattr(self.cfg, 'OBS_OBSTACLE_SCALE', 1.0))
+        if k_obs != 1.0:
+            obs[:, 24:32] = obs[:, 24:32] * k_obs
 
         return obs
 
@@ -499,7 +699,11 @@ class BatchedSnakeEnv:
         return free_path.clamp(0, 1), fd
 
     def sees_food(self, obs):
-        return obs[:, 5:14:2].max(dim=1).values > 0.0
+        if self.mode24:
+            # 24 维：5 条射线的 food_signal 通道（test7 原版口径）
+            return obs[:, 5:14:2].max(dim=1).values > 0.0
+        # 32 维投影观测：[8:16] 食物扇区投影（恒可见）
+        return obs[:, 8:16].max(dim=1).values > 0.0
 
     # ---------- 步进 ----------
     def step(self, actions):
@@ -541,8 +745,18 @@ class BatchedSnakeEnv:
                                          self.steps_wo_food)
         self._place_food_after_eat(ate)
 
-        starve = self.steps_wo_food > (2 * self.body_len.float() + 20)
+        starve = self.steps_wo_food > (float(getattr(self.cfg, 'STARVE_SLOPE', 3.0))
+                                       * self.body_len.float() + 20)
         self.alive = alive_f & (~crash) & (~starve)
+        # 死因标记（首次死亡时记录）：1撞墙 2撞己 3饿死
+        crash_wall = alive_f & out_b
+        crash_self = alive_f & (~out_b) & hit
+        starve_now = alive_f & (~crash) & starve
+        died_now = torch.where(crash_wall, 1,
+                               torch.where(crash_self, 2,
+                                           torch.where(starve_now, 3,
+                                                       torch.zeros_like(self.steps))))
+        self.died = torch.where((self.died == 0) & (died_now > 0), died_now, self.died)
         self.ate = ate
 
     def all_done(self):
@@ -552,10 +766,11 @@ class BatchedSnakeEnv:
 # ==========================================
 # 3. 批量前向（无激素 E-I 动力学）
 # ==========================================
-def forward_batch(pop, obs, E, I, st, cts, cfg):
+def forward_batch(pop, obs, E, I, st, press, cfg):
     """单次 E-I 迭代（B 个个体并行，无激素支路）。
 
-    obs [B,O] E/I/st [B,N] cts [B,A] → logits [B,A], E_new, I_new, st
+    obs [B,O] E/I/st [B,N] press [B] → logits [B,A], E_new, I_new, st
+    press 为转向压力累积器（每环境步更新，K 帧思考内恒定），只罚转向 logits。
     """
     ext = torch.bmm(pop.W_in_eff, obs.unsqueeze(-1)).squeeze(-1)
     rec = torch.bmm(pop.W_rec_eff, E.unsqueeze(-1)).squeeze(-1)
@@ -570,27 +785,30 @@ def forward_batch(pop, obs, E, I, st, cts, cfg):
     I_new = torch.sigmoid(w_ie * E_new)
 
     logits = torch.bmm(pop.W_out_eff, E_new.unsqueeze(-1)).squeeze(-1) + pop.b_out
-    fatigue = torch.relu(cts - cfg.FATIGUE_THRESHOLD) * cfg.FATIGUE_GAIN
-    fatigue = fatigue.clamp(max=cfg.FATIGUE_MAX)
-    logits = logits - fatigue
+    logits[:, 1:] = logits[:, 1:] - cfg.FATIGUE_TURN_GAIN * press.unsqueeze(1).to(logits.dtype)
     return logits, E_new, I_new, st
 
 
-def update_fatigue(cts, action):
-    cur = cts.gather(1, action.unsqueeze(1)) + 1.0
-    ncts = torch.zeros_like(cts)
-    ncts.scatter_(1, action.unsqueeze(1), cur)
-    return ncts
+def update_fatigue(press, action, decay=None):
+    """转向压力更新：press = DECAY*press + (act!=0)。任意转弯（左/右）都累积压力。"""
+    if decay is None:
+        decay = 0.7
+    return press * decay + (action != 0).to(press.dtype)
 
 
-def deliberate_batch(pop, obs, E, I, st, cts, cfg):
-    """K 倍帧率思考：内部迭代 K 次，logits 平均后 argmax（与 test5d 一致）。"""
+def deliberate_batch(pop, obs, E, I, st, press, cfg):
+    """K 倍帧率思考：内部迭代 K 次，logits 平均后 argmax（与 test5d 一致）。
+    滞回解码：转向动作 logits 统一减 TURN_MARGIN（默认 0=关；直行不罚）。"""
     K = cfg.FRAME_RATE
     logits_sum = None
     for k in range(K):
         o = obs * (cfg.INPUT_DECAY ** k)
-        logits, E, I, st = forward_batch(pop, o, E, I, st, cts, cfg)
+        logits, E, I, st = forward_batch(pop, o, E, I, st, press, cfg)
         logits_sum = logits if logits_sum is None else logits_sum + logits
+    margin = float(getattr(cfg, 'TURN_MARGIN', 0.0))
+    if margin > 0:
+        bias = logits_sum.new_tensor([0.0, 1.0, 1.0]).unsqueeze(0)
+        logits_sum = logits_sum - margin * bias
     action = torch.argmax(logits_sum, dim=1)
     return action, E, I, st
 
@@ -610,48 +828,80 @@ def _eval_chunk(pop, cfg):
     tot_food = torch.zeros(B, dtype=torch.float32, device=dev)
     tot_seen = torch.zeros(B, dtype=torch.float32, device=dev)
     tot_unseen = torch.zeros(B, dtype=torch.float32, device=dev)
+    tot_last = torch.zeros(B, dtype=torch.float32, device=dev)
+    tot_prox = torch.zeros(B, dtype=torch.float32, device=dev)
+    tot_alive = torch.zeros(B, dtype=torch.float32, device=dev)
+    tot_wall = torch.zeros(B, dtype=torch.float32, device=dev)
+    tot_self = torch.zeros(B, dtype=torch.float32, device=dev)
+    tot_starve = torch.zeros(B, dtype=torch.float32, device=dev)
     tot_act1 = torch.zeros(B, dtype=torch.float32, device=dev)
     tot_act2 = torch.zeros(B, dtype=torch.float32, device=dev)
+    tot_turn_last = torch.zeros(B, dtype=torch.float32, device=dev)
 
     for _ in range(cfg.EVAL_EPISODES):
         env.reset()
         E = torch.zeros(B, N, dtype=half, device=dev)
         I = torch.zeros(B, N, dtype=half, device=dev)
         st = torch.zeros(B, N, dtype=half, device=dev)
-        cts = torch.zeros(B, A, dtype=half, device=dev)
+        press = torch.zeros(B, dtype=torch.float32, device=dev)
+        last = torch.zeros(B, dtype=torch.float32, device=dev)
+        turn_cnt = torch.zeros(B, dtype=torch.float32, device=dev)
+        turn_last = torch.zeros(B, dtype=torch.float32, device=dev)
 
-        for _ in range(cfg.MAX_STEPS):
+        for t in range(cfg.MAX_STEPS):
             al = env.alive
             obs = env.obs().to(half)
             sees = env.sees_food(obs)
             tot_seen += (al & sees).float()
             tot_unseen += (al & (~sees)).float()
+            # 接近度：存活期间的 1/欧氏距离（食物永远可见时的方向性梯度）
+            fr = (env.food[:, 0] - env.head[:, 0]).float()
+            fc = (env.food[:, 1] - env.head[:, 1]).float()
+            dist = torch.sqrt(fr * fr + fc * fc).clamp(min=1.0)
+            tot_prox += al.float() / dist
+            tot_alive += al.float()
 
-            act, E, I, st = deliberate_batch(pop, obs, E, I, st, cts, cfg)
-            cts = update_fatigue(cts, act)
+            act, E, I, st = deliberate_batch(pop, obs, E, I, st, press, cfg)
+            press = update_fatigue(press, act, decay=float(cfg.FATIGUE_TURN_DECAY))
             tot_act1 += (al & (act == 1)).float()
             tot_act2 += (al & (act == 2)).float()
+            turn_cnt += (al & (act != 0)).float()
 
             env.step(act)
-            tot_food += (al & env.ate).float()
+            ate_now = al & env.ate
+            tot_food += ate_now.float()
+            last = torch.where(ate_now, torch.full_like(last, float(t + 1)), last)
+            turn_last = torch.where(ate_now, turn_cnt, turn_last)
             if env.all_done():
                 break
+        tot_last += last
+        tot_turn_last += turn_last
+        tot_wall += (env.died == 1).float()
+        tot_self += (env.died == 2).float()
+        tot_starve += (env.died == 3).float()
 
     E_ = float(cfg.EVAL_EPISODES)
-    metrics = torch.stack((tot_food, tot_seen, tot_unseen), dim=1) / E_
+    prox = tot_prox / torch.clamp(tot_alive, min=1e-6)
+    # [8:10] 每局平均转向次数（act1/act2）；[10] 吃最后一颗食物为止的转向数
+    metrics = torch.stack((tot_food, tot_seen, tot_unseen, tot_last, prox,
+                           tot_wall, tot_self, tot_starve,
+                           tot_act1 / E_, tot_act2 / E_, tot_turn_last / E_), dim=1)
+    metrics[:, :4] /= E_
 
-    # 单侧转弯判死（阈值随局数等比缩放，与原版一致）
-    turn_lim = max(cfg.EVAL_EPISODES, 1)
-    c1 = tot_act1.cpu().numpy()
-    c2 = tot_act2.cpu().numpy()
+    # 单侧转弯判死（默认关闭：早期随机个体普遍摇头，判罚干扰初期筛选）
     m = metrics.cpu().numpy()
-    death = ((c1 > turn_lim) | (c2 > turn_lim)) & ((c1 == 0) | (c2 == 0))
-    m[death] = (0.0, 99999.0, 0.0)
+    if getattr(cfg, 'ONE_SIDED_TURN_DEATH', False):
+        turn_lim = max(cfg.EVAL_EPISODES, 1)
+        c1 = tot_act1.cpu().numpy()
+        c2 = tot_act2.cpu().numpy()
+        death = ((c1 > turn_lim) | (c2 > turn_lim)) & ((c1 == 0) | (c2 == 0))
+        m[death] = (0.0, 99999.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     return torch.from_numpy(m).float()
 
 
 def evaluate_population_gpu(pop, cfg):
-    """全种群评估：按显存分块并行，返回 [P,3] = (food, seen, unseen)。"""
+    """全种群评估：按显存分块并行，返回 [P,11] = (food, seen, unseen, steps_last, prox,
+    wall_die, self_die, starve_die, act1_avg, act2_avg, turns_last)。"""
     if getattr(cfg, 'USE_FP16', True):
         pop.fp16()
     batch = _auto_eval_batch(cfg, pop.device)
@@ -659,7 +909,7 @@ def evaluate_population_gpu(pop, cfg):
         pop.refresh_eff()
         return _eval_chunk(pop, cfg)
 
-    metrics = torch.zeros(pop.P, 3)
+    metrics = torch.zeros(pop.P, 11)
     for lo in range(0, pop.P, batch):
         sub = pop[slice(lo, min(lo + batch, pop.P))]
         sub.refresh_eff()
@@ -683,14 +933,9 @@ def evolve_topology_gpu(pop, metrics, cfg, gen=0):
     has_g1 = 'G1' in active
     has_g2 = 'G2' in active
 
-    # --- 动态变异控制（test5d v2 同款余弦退火/指数衰减）---
-    cos_mode = getattr(cfg, 'EVO_COS_MODE', 'anneal')
-    if cos_mode == 'oscillate':
-        period = max(1, int(getattr(cfg, 'EVO_COS_PERIOD', 100)))
-        cos_factor = 0.5 + 0.5 * math.cos(2.0 * math.pi * gen / period)
-    else:
-        cos_factor = 0.5 + 0.5 * math.cos(math.pi * gen / max(1, float(cfg.GENERATIONS)))
-    dyn_factor = math.exp(-gen / max(1e-6, float(getattr(cfg, 'EVO_DYN_DECAY_TAU', 33))))
+    # --- 变异强度固定为常量（不再随代数衰减，避免后期筛选停滞）---
+    cos_factor = 1.0
+    dyn_factor = 1.0
     topo_mut_prob = cfg.TOPOLOGY_MUT_PROB * cos_factor
     mask_mut_rate = cfg.MUT_RATE * cos_factor
     weight_mut_frac = cfg.WEIGHT_MUT_FRAC * cos_factor
@@ -699,10 +944,10 @@ def evolve_topology_gpu(pop, metrics, cfg, gen=0):
     w_ei_std = cfg.W_EI_MUT_STD * dyn_factor
     w_ie_std = cfg.W_IE_MUT_STD * dyn_factor
 
-    # --- 精英排序（与 test5d _selection_key 一致）---
-    threshold = float(getattr(cfg, 'LONG_SNAKE_SCORE_THRESHOLD', 3.0))
+    # --- 精英排序（按 FIT_MODE 分发适应度）---
     mn = metrics.cpu().numpy()
-    order = sorted(range(P), key=lambda i: _selection_key(mn[i][0], mn[i][1], mn[i][2], threshold),
+    key_fn = _make_key_fn(cfg)
+    order = sorted(range(P), key=lambda i: key_fn(mn[i]),
                    reverse=True)
     elite_idx = order[:cfg.ELITE_SIZE]
     elites = pop[elite_idx]
@@ -827,7 +1072,7 @@ def save_best_model(path, st, cfg, food, seen, unseen):
 
 def save_checkpoint7(path, cfg, next_gen, pop, history,
                      cum_eval_time, cum_evolve_time,
-                     best_state, best_food, best_seen, best_unseen):
+                     best_state, best_food, best_seen, best_unseen, best_last, best_prox):
     parent = os.path.dirname(os.path.abspath(path))
     if parent:
         os.makedirs(parent, exist_ok=True)
@@ -841,6 +1086,8 @@ def save_checkpoint7(path, cfg, next_gen, pop, history,
         'best_food': float(best_food),
         'best_seen': float(best_seen),
         'best_unseen': float(best_unseen),
+        'best_last': float(best_last),
+        'best_prox': float(best_prox),
         'config': _cfg_dict(cfg),
         'random_state': random.getstate(),
         'torch_rng_state': torch.get_rng_state(),
@@ -889,6 +1136,15 @@ def run_training(cfg):
     best_food = -1.0
     best_seen = 0.0
     best_unseen = 0.0
+    best_last = 0.0
+    best_prox = 0.0
+    # 跨代最优的指标行（seen=99999 → 适应度 -1e9，保证首代必然刷新）
+    best_row = np.zeros(11)
+    best_row[1] = 99999.0
+    latest_gen_best_state = None
+    latest_gen_best_food = -1.0
+    latest_gen_best_seen = 0.0
+    latest_gen_best_unseen = 0.0
 
     if cfg.AUTO_RESUME:
         ck = load_checkpoint7(cfg.CHECKPOINT_PATH, cfg)
@@ -902,6 +1158,8 @@ def run_training(cfg):
             best_food = float(ck.get('best_food', -1.0))
             best_seen = float(ck.get('best_seen', 0.0))
             best_unseen = float(ck.get('best_unseen', 0.0))
+            best_last = float(ck.get('best_last', 0.0))
+            best_prox = float(ck.get('best_prox', 0.0))
             if best_state is not None:
                 random.setstate(ck['random_state'])
                 torch.set_rng_state(ck['torch_rng_state'])
@@ -921,10 +1179,9 @@ def run_training(cfg):
                 if seed is not None:
                     st, s_food, s_steps = seed
                     pop.set_individual_from_state(0, st)
-                    best_state = pop.individual_state(0, use_half=False)
-                    best_food = s_food
-                    best_seen = 0.0
-                    best_unseen = 0.0
+                    # 不写入 best_*：best_last=0 会使适应度键虚高（eff=food/max(0,1)），
+                    # 后代真实成绩永远追不上，跨代最优被冻结为种子。
+                    # 种子留在种群首位，第 0 代评估中自然参与 best_idx 竞争。
                     print(f"  [Seed] 已注入 {sp} 作为种群种子 "
                           f"(Food={s_food:.1f}, Steps={s_steps:.1f})")
                     break
@@ -934,22 +1191,37 @@ def run_training(cfg):
 
         save_checkpoint7(cfg.CHECKPOINT_PATH, cfg, 0, pop, history,
                          cum_eval_time, cum_evolve_time,
-                         best_state, best_food, best_seen, best_unseen)
+                         best_state, best_food, best_seen, best_unseen, best_last, best_prox)
+
+    # 退火基准增益（捕获 CLI 覆盖后的初始值，主循环按代计算有效增益）
+    cfg._FATIGUE_GAIN0 = float(cfg.FATIGUE_TURN_GAIN)
 
     try:
         for gen in range(start_gen, cfg.GENERATIONS):
             t_eval = time.perf_counter()
+            # 脚手架退火：gain_t = max(FLOOR, GAIN·FACTOR^(gen//PERIOD))，逐周期撤除拐杖
+            cfg.FATIGUE_TURN_GAIN = max(
+                float(cfg.FATIGUE_FLOOR),
+                float(cfg._FATIGUE_GAIN0) * (cfg.ANNEAL_FACTOR ** (gen // cfg.ANNEAL_PERIOD)))
             metrics = evaluate_population_gpu(pop, cfg)
             eval_time = time.perf_counter() - t_eval
             cum_eval_time += eval_time
 
             mn = metrics.numpy()
-            threshold = float(getattr(cfg, 'LONG_SNAKE_SCORE_THRESHOLD', 3.0))
-            best_idx = max(range(cfg.POP_SIZE),
-                           key=lambda i: _selection_key(mn[i][0], mn[i][1], mn[i][2], threshold))
-            b_food, b_seen, b_unseen = (float(mn[best_idx][0]), float(mn[best_idx][1]),
-                                        float(mn[best_idx][2]))
+            key_fn = _make_key_fn(cfg)
+            best_idx = max(range(cfg.POP_SIZE), key=lambda i: key_fn(mn[i]))
+            b_food, b_seen, b_unseen, b_last, b_prox = (
+                float(mn[best_idx][0]), float(mn[best_idx][1]),
+                float(mn[best_idx][2]), float(mn[best_idx][3]), float(mn[best_idx][4]))
+            b_turn = (float(mn[best_idx][8]) + float(mn[best_idx][9])) / max(b_seen + b_unseen, 1.0)
             avg_food = float(np.mean(mn[:, 0]))
+
+            # 精英均值（观察选择压力是否在累积）
+            elite_order = sorted(range(cfg.POP_SIZE),
+                                 key=lambda i: key_fn(mn[i]),
+                                 reverse=True)[:cfg.ELITE_SIZE]
+            elite_avg_food = float(np.mean([mn[i][0] for i in elite_order]))
+            elite_avg_prox = float(np.mean([mn[i][4] for i in elite_order]))
 
             history['gen'].append(gen)
             history['best_food'].append(b_food)
@@ -957,15 +1229,21 @@ def run_training(cfg):
             history['best_seen'].append(b_seen)
             history['best_unseen'].append(b_unseen)
 
-            # 跨代跟踪历史最优
-            if (b_food > best_food or
-                    (b_food == best_food and best_food >= 0 and
-                     ((b_food > threshold and b_unseen > best_unseen) or
-                      (b_food <= threshold and b_seen < best_seen)))):
+            # 跨代跟踪历史最优（按当前 FIT_MODE 的适应度比较）
+            if key_fn(mn[best_idx]) > key_fn(best_row):
                 best_food = b_food
                 best_seen = b_seen
                 best_unseen = b_unseen
+                best_last = b_last
+                best_prox = b_prox
+                best_row = mn[best_idx].copy()
                 best_state = pop.individual_state(best_idx, use_half=False)
+
+            # 记录当前代最优（进化会覆盖种群，须在 evolve 前快照）
+            latest_gen_best_state = pop.individual_state(best_idx, use_half=False)
+            latest_gen_best_food = b_food
+            latest_gen_best_seen = b_seen
+            latest_gen_best_unseen = b_unseen
 
             if gen < cfg.GENERATIONS - 1:
                 t_ev = time.perf_counter()
@@ -976,22 +1254,34 @@ def run_training(cfg):
                 evolve_time = 0.0
 
             if (gen + 1) % cfg.PRINT_HISTORY_EVERY == 0:
-                print(f"Gen {gen + 1}/{cfg.GENERATIONS} | "
+                b_eff = b_food / max(b_last, 1.0)
+                b_turn = (float(mn[best_idx][8]) + float(mn[best_idx][9])) / max(b_seen + b_unseen, 1.0)
+                b_fit = key_fn(mn[best_idx])
+                b_fit = b_fit if np.isscalar(b_fit) else b_fit[0]
+                avg_wall = float(np.mean(mn[:, 5]))
+                avg_self = float(np.mean(mn[:, 6]))
+                avg_starve = float(np.mean(mn[:, 7]))
+                print(f"Gen {gen + 1}/{cfg.GENERATIONS} | Fat: {cfg.FATIGUE_TURN_GAIN:.3f} | "
                       f"BestFood: {b_food:.2f} | BestSeen: {b_seen:.1f} | "
-                      f"BestUnseen: {b_unseen:.1f} | AvgFood: {avg_food:.2f} | "
+                      f"BestUnseen: {b_unseen:.1f} | BestEff: {b_eff:.3f} | "
+                      f"BestTurn: {b_turn:.3f} | BestFit: {b_fit:.3f} | "
+                      f"BestProx: {b_prox:.3f} | AvgFood: {avg_food:.2f} | "
+                      f"EliteFood: {elite_avg_food:.2f} | EliteProx: {elite_avg_prox:.3f} | "
+                      f"Die(W/S/St): {avg_wall:.2f}/{avg_self:.2f}/{avg_starve:.2f} | "
                       f"eval {eval_time:.1f}s / evolve {evolve_time:.1f}s")
 
             if (gen + 1) % cfg.CHECKPOINT_INTERVAL == 0:
                 save_checkpoint7(cfg.CHECKPOINT_PATH, cfg, gen + 1, pop, history,
                                  cum_eval_time, cum_evolve_time,
-                                 best_state, best_food, best_seen, best_unseen)
+                                 best_state, best_food, best_seen, best_unseen, best_last, best_prox)
 
     except KeyboardInterrupt:
-        nxt = gen + 1 if 'gen' in dir() else start_gen
+        # 中断代未完成（评估/进化被切断），续训从该代重跑而非跳到下一代
+        nxt = gen if 'gen' in dir() else start_gen
         print("\n训练被中断 (Ctrl+C)，正在保存断点...")
         save_checkpoint7(cfg.CHECKPOINT_PATH, cfg, nxt, pop, history,
                          cum_eval_time, cum_evolve_time,
-                         best_state, best_food, best_seen, best_unseen)
+                         best_state, best_food, best_seen, best_unseen, best_last, best_prox)
         print(f"断点已保存: {cfg.CHECKPOINT_PATH} (下次从第 {nxt} 代接续)")
         sys.exit(0)
 
@@ -1006,6 +1296,14 @@ def run_training(cfg):
     save_best_model(cfg.BEST_MODEL_PATH, best_state, cfg, best_food, best_seen, best_unseen)
     print(f"\n最优模型已保存: {cfg.BEST_MODEL_PATH} "
           f"(Food={best_food:.2f}, Seen={best_seen:.1f}, Unseen={best_unseen:.1f})")
+
+    if latest_gen_best_state is not None:
+        save_best_model(cfg.LATEST_GEN_BEST_MODEL_PATH, latest_gen_best_state, cfg,
+                        latest_gen_best_food, latest_gen_best_seen, latest_gen_best_unseen)
+        print(f"最新一代最优模型已保存: {cfg.LATEST_GEN_BEST_MODEL_PATH} "
+              f"(Food={latest_gen_best_food:.2f}, Seen={latest_gen_best_seen:.1f}, "
+              f"Unseen={latest_gen_best_unseen:.1f})")
+    
 
     if os.path.exists(cfg.CHECKPOINT_PATH):
         os.remove(cfg.CHECKPOINT_PATH)
@@ -1032,9 +1330,10 @@ def run_training(cfg):
         ax2.legend()
         ax2.grid(True, alpha=0.3)
         plt.tight_layout()
-        fig.savefig('test7_history.png', dpi=100)
+        hist_path = cfg.CHECKPOINT_PATH.replace('_checkpoint', '_history').replace('.pth', '.png')
+        fig.savefig(hist_path, dpi=100)
         plt.close(fig)
-        print("历史曲线已保存: test7_history.png")
+        print(f"历史曲线已保存: {hist_path}")
     except Exception as e:
         print(f"(matplotlib 曲线跳过: {e})")
 
@@ -1067,7 +1366,7 @@ def play_best(cfg, max_steps=300):
     E = torch.zeros(1, pop.N, dtype=pop.dtype, device=dev)
     I = torch.zeros(1, pop.N, dtype=pop.dtype, device=dev)
     stt = torch.zeros(1, pop.N, dtype=pop.dtype, device=dev)
-    cts = torch.zeros(1, pop.A, dtype=pop.dtype, device=dev)
+    press = torch.zeros(1, dtype=torch.float32, device=dev)
     G = cfg.GRID_SIZE
 
     def render():
@@ -1085,8 +1384,8 @@ def play_best(cfg, max_steps=300):
     ep_food = 0
     for s in range(max_steps):
         obs = env.obs().to(pop.dtype)
-        act, E, I, stt = deliberate_batch(pop, obs, E, I, stt, cts, cfg)
-        cts = update_fatigue(cts, act)
+        act, E, I, stt = deliberate_batch(pop, obs, E, I, stt, press, cfg)
+        press = update_fatigue(press, act, decay=float(cfg.FATIGUE_TURN_DECAY))
         before = ep_food
         env.step(act)
         if env.ate[0]:
@@ -1108,7 +1407,7 @@ def make_smoke_config():
     cfg = Config()
     cfg.POP_SIZE = 16
     cfg.NUM_COLUMNS = 24
-    cfg.OBS_DIM = 24
+    cfg.OBS_DIM = 32
     cfg.ACTION_DIM = 3
     cfg.GENERATIONS = 3
     cfg.ELITE_SIZE = 6
@@ -1116,8 +1415,9 @@ def make_smoke_config():
     cfg.MAX_STEPS = 60
     cfg.FRAME_RATE = 2
     cfg.CHECKPOINT_INTERVAL = 2
-    cfg.CHECKPOINT_PATH = 'test7_smoke_checkpoint.pth'
-    cfg.BEST_MODEL_PATH = 'test7_smoke_best.pth'
+    cfg.CHECKPOINT_PATH = 'test7f_smoke_checkpoint.pth'
+    cfg.BEST_MODEL_PATH = 'test7f_smoke_best.pth'
+    cfg.LATEST_GEN_BEST_MODEL_PATH = 'test7f_smoke_latest_gen_best.pth'
     cfg.SEED_FROM_BEST = False
     cfg.EVAL_BATCH = 16
     cfg.PRINT_HISTORY_EVERY = 1
@@ -1125,7 +1425,7 @@ def make_smoke_config():
 
 
 def main():
-    ap = argparse.ArgumentParser(description='test7 — GPU 全并行进化（无激素 EI-RNN）')
+    ap = argparse.ArgumentParser(description='test7e — 整局转弯密度计价（基于 test7d 诊断）')
     ap.add_argument('--smoke', action='store_true', help='小规模快速自检')
     ap.add_argument('--gens', type=int, default=None)
     ap.add_argument('--pop', type=int, default=None)
@@ -1133,6 +1433,36 @@ def main():
     ap.add_argument('--episodes', type=int, default=None)
     ap.add_argument('--max-steps', type=int, default=None)
     ap.add_argument('--device', type=str, default=None)
+    ap.add_argument('--fit-mode', type=str, default=None, choices=['econ', 'additive', 'tuple'],
+                    help='适应度模式（默认 econ）；决定文件前缀 test7f_econ_*/test7f_add_*')
+    ap.add_argument('--turn-cost', type=float, default=None,
+                    help='econ 臂：一次转弯折算的额外步数成本（默认 1.0）')
+    ap.add_argument('--step-ref', type=float, default=None,
+                    help='econ 臂：每颗食物参考步数（默认 10.0）')
+    ap.add_argument('--turn-penalty', type=float, default=None,
+                    help='additive 臂：转向占比扣分权重（默认 3.0）')
+    ap.add_argument('--one-sided-death', action='store_true',
+                    help='重新开启单侧转弯判死（默认关闭）')
+    ap.add_argument('--starve-slope', type=float, default=None,
+                    help='饿死斜率（默认 3.0；test7a 旧值为 2.0）')
+    ap.add_argument('--eff-weight', type=float, default=None,
+                    help='additive 臂：效率项权重（默认 0.3）')
+    ap.add_argument('--turn-margin', type=float, default=None,
+                    help='滞回解码：转向 logits 门槛（默认 0=关，诊断显示非抖动）')
+    ap.add_argument('--crowd-weight', type=float, default=None,
+                    help='拥挤加权 CROWD_W：转向成本 ×(1+W·food/50)（默认 0=关）')
+    ap.add_argument('--anneal-period', type=int, default=None,
+                    help='疲劳退火周期：每 N 代降一档（默认 20）')
+    ap.add_argument('--anneal-factor', type=float, default=None,
+                    help='疲劳退火乘子（默认 0.7）')
+    ap.add_argument('--fatigue-floor', type=float, default=None,
+                    help='疲劳增益下限（默认 0.05）')
+    ap.add_argument('--turn-gain', type=float, default=None,
+                    help='转向疲劳增益（默认 0.2）')
+    ap.add_argument('--turn-decay', type=float, default=None,
+                    help='转向压力衰减（默认 0.9）')
+    ap.add_argument('--seed-model', type=str, default=None,
+                    help='指定种子模型路径（覆盖 SEED_MODEL_PATH 并启用种子注入）')
     ap.add_argument('--play', action='store_true', help='加载最优模型播放一局')
     args = ap.parse_args()
 
@@ -1153,6 +1483,43 @@ def main():
         cfg.MAX_STEPS = args.max_steps
     if args.device:
         cfg.DEVICE = args.device
+    if args.fit_mode:
+        cfg.FIT_MODE = args.fit_mode
+        # 按臂切换文件前缀，双臂互不干扰（smoke 模式保持独立路径，不触碰正式臂文件）
+        if not args.smoke:
+            arm = 'econ' if args.fit_mode == 'econ' else ('add' if args.fit_mode == 'additive' else 'tup')
+            cfg.CHECKPOINT_PATH = f'test7f_{arm}_checkpoint.pth'
+            cfg.BEST_MODEL_PATH = f'test7f_{arm}_best_model.pth'
+            cfg.LATEST_GEN_BEST_MODEL_PATH = f'test7f_{arm}_latest_gen_best.pth'
+    if args.turn_cost is not None:
+        cfg.TURN_COST = args.turn_cost
+    if args.turn_margin is not None:
+        cfg.TURN_MARGIN = args.turn_margin
+    if args.crowd_weight is not None:
+        cfg.CROWD_W = args.crowd_weight
+    if args.step_ref is not None:
+        cfg.STEP_REF = args.step_ref
+    if args.turn_penalty is not None:
+        cfg.TURN_PENALTY = args.turn_penalty
+    if args.one_sided_death:
+        cfg.ONE_SIDED_TURN_DEATH = True
+    if args.starve_slope is not None:
+        cfg.STARVE_SLOPE = args.starve_slope
+    if args.eff_weight is not None:
+        cfg.FOOD_EFF_WEIGHT = args.eff_weight
+    if args.turn_gain is not None:
+        cfg.FATIGUE_TURN_GAIN = args.turn_gain
+    if args.anneal_period is not None:
+        cfg.ANNEAL_PERIOD = args.anneal_period
+    if args.anneal_factor is not None:
+        cfg.ANNEAL_FACTOR = args.anneal_factor
+    if args.fatigue_floor is not None:
+        cfg.FATIGUE_FLOOR = args.fatigue_floor
+    if args.turn_decay is not None:
+        cfg.FATIGUE_TURN_DECAY = args.turn_decay
+    if args.seed_model:
+        cfg.SEED_FROM_BEST = True
+        cfg.SEED_MODEL_PATH = args.seed_model
 
     if args.play:
         play_best(cfg)

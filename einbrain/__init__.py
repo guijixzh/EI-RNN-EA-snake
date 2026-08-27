@@ -4,6 +4,8 @@
     - evolve.evolution：      CPU 进化训练（test5d 语义，多进程 + 两阶段筛选）
     - ppo.run_training：      PPO 强化学习（test6 语义，K 帧思考 + 截断 BPTT）
     - gpu.run_training_gpu：  GPU 全并行进化（test7 语义，GeneStack 张量化）
+    - neat.NEATPopulation：   真正 NEAT 引擎（创新号 + 物种化 + 历史标记交叉，
+                              test8 契合度验证，配 RaySnakeEnv 32 维观测）
 
 模型文件（test5d/6/7 三种格式）统一经 io.load_best_model_brain / io.model_path
 读取，可互相作为种子注入。
@@ -14,7 +16,7 @@
     best_brain, history = run_evolution(cfg)
 """
 from .config import Config, make_smoke_config
-from .env import SnakeEnv, _obs_sees_food
+from .env import SnakeEnv, _obs_sees_food, RaySnakeEnv, ray_obs_sees_food
 from .brain import EIBrainRegion
 from .dynamics import (clamp_w, hormone_commands, diffuse_decay,
                        effective_tau_e, ei_update, fatigue_penalty)
@@ -29,7 +31,7 @@ from . import vis
 
 __all__ = [
     'Config', 'make_smoke_config',
-    'SnakeEnv', '_obs_sees_food',
+    'SnakeEnv', '_obs_sees_food', 'RaySnakeEnv', 'ray_obs_sees_food',
     'EIBrainRegion',
     'clamp_w', 'hormone_commands', 'diffuse_decay',
     'effective_tau_e', 'ei_update', 'fatigue_penalty',

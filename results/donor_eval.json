@@ -1,0 +1,9 @@
+{
+ "food_mean": 14.0,
+ "food_std": 6.763874530792236,
+ "food_min": 5.0,
+ "food_max": 33.0,
+ "turn_density": 0.5263370275497437,
+ "manhattan": true,
+ "fatigue": 0.05
+}

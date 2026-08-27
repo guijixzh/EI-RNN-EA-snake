@@ -1,0 +1,429 @@
+{
+ "checkpoint": {
+  "next_gen": 50,
+  "hist_len": 50,
+  "best_food": 40.900001525878906,
+  "tail_best_food": [
+   39.2,
+   37.8,
+   40.1,
+   38.1,
+   39.1,
+   39.8,
+   39.6,
+   39.8,
+   38.1,
+   38.2,
+   40.3,
+   40.9
+  ],
+  "tail_avg_food": [
+   16.51,
+   16.76,
+   17.43,
+   17.12,
+   16.84,
+   16.95,
+   16.58,
+   16.58,
+   16.49,
+   16.46,
+   16.5,
+   16.62
+  ],
+  "config": {
+   "FIT_MODE": "econ",
+   "FATIGUE_TURN_GAIN": 0.05,
+   "REACH_W": 0.25,
+   "FOOD_EFF_WEIGHT": 0.3,
+   "TURN_COST": 0.0,
+   "OBS_MANHATTAN": true,
+   "GENERATIONS": 100,
+   "POP_SIZE": 2048,
+   "EVAL_EPISODES": 10,
+   "SEED_FROM_BEST": true,
+   "STARVE_SLOPE": 3.0
+  },
+  "saved_at": "2026-08-27 17:16:11"
+ },
+ "models": {
+  "7g_phase2_best(40平台)": {
+   "file": "test7g_econ_best_model.pth",
+   "saved_food": 39.5,
+   "summary": {
+    "n": 40,
+    "food_mean": 32.725,
+    "food_std": 8.811888276640826,
+    "food_sem": 1.393281872056046,
+    "food_max": 50,
+    "food_min": 9,
+    "turn_density": {
+     "early": 0.7493896058597838,
+     "mid": 0.8257106094280032,
+     "late": 0.7965164963992631,
+     "post": 0.8540313335880779
+    },
+    "straight_run_le2_frac": 0.8067291111101191,
+    "straight_run_median": 1.0,
+    "reach_eat_mean": 0.9317294335880412,
+    "reach_cont_mean": 0.9469876714642332,
+    "pocket_spawn_unreachable_frac": 0.07868601986249045,
+    "pocket_ratio_mean": 0.8967901627441357,
+    "died": {
+     "3": 22,
+     "2": 14,
+     "1": 4
+    },
+    "steps_last_mean": 506.35
+   },
+   "eat_ordinal_curve": [
+    {
+     "bin": "1-5",
+     "n": 200,
+     "reach": 0.9998941770195962,
+     "unreachable_frac": 0.0,
+     "pocket": 0.9998941770195962
+    },
+    {
+     "bin": "6-10",
+     "n": 199,
+     "reach": 0.9991059752564934,
+     "unreachable_frac": 0.005025125628140704,
+     "pocket": 0.9943593960798266
+    },
+    {
+     "bin": "11-15",
+     "n": 195,
+     "reach": 0.9944098371725816,
+     "unreachable_frac": 0.005128205128205128,
+     "pocket": 0.9911131337667123
+    },
+    {
+     "bin": "16-20",
+     "n": 191,
+     "reach": 0.9474275123074417,
+     "unreachable_frac": 0.05759162303664921,
+     "pocket": 0.9190956560885095
+    },
+    {
+     "bin": "21-25",
+     "n": 176,
+     "reach": 0.9102960662408308,
+     "unreachable_frac": 0.0625,
+     "pocket": 0.8849605871364474
+    },
+    {
+     "bin": "26-30",
+     "n": 136,
+     "reach": 0.8765986540957409,
+     "unreachable_frac": 0.13970588235294118,
+     "pocket": 0.8261157425791573
+    },
+    {
+     "bin": "31-35",
+     "n": 112,
+     "reach": 0.7590429317206144,
+     "unreachable_frac": 0.25892857142857145,
+     "pocket": 0.7074737888760865
+    },
+    {
+     "bin": "36-40",
+     "n": 69,
+     "reach": 0.714803878703843,
+     "unreachable_frac": 0.2898550724637681,
+     "pocket": 0.6408107758810123
+    },
+    {
+     "bin": "41-45",
+     "n": 24,
+     "reach": 0.6146622744078437,
+     "unreachable_frac": 0.3333333333333333,
+     "pocket": 0.5522957304492593
+    },
+    {
+     "bin": "46-50",
+     "n": 7,
+     "reach": 0.5978605364050184,
+     "unreachable_frac": 0.42857142857142855,
+     "pocket": 0.3449609519115516
+    }
+   ],
+   "run_hist": {
+    "1": 1606,
+    "2": 483,
+    "3": 198,
+    "4": 118,
+    "5": 80,
+    "6": 43,
+    "7": 28,
+    "8": 4
+   },
+   "fitness_tau_vs_food": {
+    "cur_vs_food": 1.0,
+    "noreach_vs_food": 1.0,
+    "reach25_vs_food": 0.9841688654353562,
+    "cont_vs_food": 1.0
+   },
+   "inversions_top5": [],
+   "inversions_count": 0
+  },
+  "7g_phase1_econ(30平台)": {
+   "file": "test7g_econ_best_100gen.pth",
+   "saved_food": 29.200000762939453,
+   "summary": {
+    "n": 40,
+    "food_mean": 23.125,
+    "food_std": 6.152997237119484,
+    "food_sem": 0.9728742853010351,
+    "food_max": 36,
+    "food_min": 3,
+    "turn_density": {
+     "early": 0.29672596029904613,
+     "mid": 0.31561290322580643,
+     "late": 0.30859375,
+     "post": 0.35276073619631904
+    },
+    "straight_run_le2_frac": 0.4514125149101392,
+    "straight_run_median": 3.0,
+    "reach_eat_mean": 0.9621681084575495,
+    "reach_cont_mean": 0.9556403798260199,
+    "pocket_spawn_unreachable_frac": 0.043243243243243246,
+    "pocket_ratio_mean": 0.9410012449585908,
+    "died": {
+     "2": 27,
+     "1": 13
+    },
+    "steps_last_mean": 200.25
+   },
+   "eat_ordinal_curve": [
+    {
+     "bin": "1-5",
+     "n": 198,
+     "reach": 1.0,
+     "unreachable_frac": 0.0,
+     "pocket": 1.0
+    },
+    {
+     "bin": "6-10",
+     "n": 195,
+     "reach": 0.9957264957519678,
+     "unreachable_frac": 0.005128205128205128,
+     "pocket": 0.9870802259215942
+    },
+    {
+     "bin": "11-15",
+     "n": 192,
+     "reach": 0.980211497672523,
+     "unreachable_frac": 0.020833333333333332,
+     "pocket": 0.9431424309053303
+    },
+    {
+     "bin": "16-20",
+     "n": 167,
+     "reach": 0.9448580888663224,
+     "unreachable_frac": 0.041916167664670656,
+     "pocket": 0.9282939119967158
+    },
+    {
+     "bin": "21-25",
+     "n": 119,
+     "reach": 0.8808451023171929,
+     "unreachable_frac": 0.13445378151260504,
+     "pocket": 0.8347665991853265
+    },
+    {
+     "bin": "26-30",
+     "n": 38,
+     "reach": 0.8017006134124178,
+     "unreachable_frac": 0.2631578947368421,
+     "pocket": 0.8095341727725769
+    },
+    {
+     "bin": "31-35",
+     "n": 15,
+     "reach": 0.8790492534637451,
+     "unreachable_frac": 0.06666666666666667,
+     "pocket": 0.8936146855354309
+    },
+    {
+     "bin": "36-40",
+     "n": 1,
+     "reach": 0.6190476417541504,
+     "unreachable_frac": 1.0,
+     "pocket": 0.3333333432674408
+    }
+   ],
+   "run_hist": {
+    "1": 447,
+    "2": 373,
+    "3": 290,
+    "4": 250,
+    "5": 193,
+    "6": 120,
+    "7": 100,
+    "8": 40
+   },
+   "fitness_tau_vs_food": {
+    "cur_vs_food": 1.0,
+    "noreach_vs_food": 1.0,
+    "reach25_vs_food": 0.9838709677419355,
+    "cont_vs_food": 1.0
+   },
+   "inversions_top5": [],
+   "inversions_count": 0
+  },
+  "7b_67分基线": {
+   "file": "test7b_best_model.pth",
+   "saved_food": 61.79999923706055,
+   "summary": {
+    "n": 40,
+    "food_mean": 50.2,
+    "food_std": 19.0370691021491,
+    "food_sem": 3.0100249168403903,
+    "food_max": 69,
+    "food_min": 0,
+    "turn_density": {
+     "early": 0.8125940253599828,
+     "mid": 0.876858308117353,
+     "late": 0.8982282653481665,
+     "post": 0.9082864038616251
+    },
+    "straight_run_le2_frac": 0.8962312564544226,
+    "straight_run_median": 1.0,
+    "reach_eat_mean": 0.7963653654261642,
+    "reach_cont_mean": 0.8783425283513573,
+    "pocket_spawn_unreachable_frac": 0.11653386454183266,
+    "pocket_ratio_mean": 0.8065252024494853,
+    "died": {
+     "1": 4,
+     "2": 27,
+     "3": 9
+    },
+    "steps_last_mean": 852.425
+   },
+   "eat_ordinal_curve": [
+    {
+     "bin": "1-5",
+     "n": 180,
+     "reach": 1.0,
+     "unreachable_frac": 0.0,
+     "pocket": 1.0
+    },
+    {
+     "bin": "6-10",
+     "n": 180,
+     "reach": 0.9992592437399759,
+     "unreachable_frac": 0.0,
+     "pocket": 0.9978527466456095
+    },
+    {
+     "bin": "11-15",
+     "n": 180,
+     "reach": 0.9887949418690469,
+     "unreachable_frac": 0.005555555555555556,
+     "pocket": 0.9724728282541036
+    },
+    {
+     "bin": "16-20",
+     "n": 180,
+     "reach": 0.9394919254713588,
+     "unreachable_frac": 0.05555555555555555,
+     "pocket": 0.8957685015888678
+    },
+    {
+     "bin": "21-25",
+     "n": 176,
+     "reach": 0.9128502419387753,
+     "unreachable_frac": 0.07954545454545454,
+     "pocket": 0.859703007566912
+    },
+    {
+     "bin": "26-30",
+     "n": 173,
+     "reach": 0.8548031166798806,
+     "unreachable_frac": 0.12138728323699421,
+     "pocket": 0.7776452745230211
+    },
+    {
+     "bin": "31-35",
+     "n": 170,
+     "reach": 0.8106537123813349,
+     "unreachable_frac": 0.16470588235294117,
+     "pocket": 0.7097678096964956
+    },
+    {
+     "bin": "36-40",
+     "n": 169,
+     "reach": 0.8207915612226407,
+     "unreachable_frac": 0.17751479289940827,
+     "pocket": 0.6979903718952597
+    },
+    {
+     "bin": "41-45",
+     "n": 161,
+     "reach": 0.8017148741098664,
+     "unreachable_frac": 0.2111801242236025,
+     "pocket": 0.6587140780081104
+    },
+    {
+     "bin": "46-50",
+     "n": 439,
+     "reach": 0.7964113911185287,
+     "unreachable_frac": 0.21867881548974943,
+     "pocket": 0.6676342684928336
+    }
+   ],
+   "run_hist": {
+    "1": 2494,
+    "2": 529,
+    "3": 160,
+    "4": 22,
+    "5": 5
+   },
+   "fitness_tau_vs_food": {
+    "cur_vs_food": 1.0,
+    "noreach_vs_food": 1.0,
+    "reach25_vs_food": 0.997289972899729,
+    "cont_vs_food": 1.0
+   },
+   "inversions_top5": [],
+   "inversions_count": 0
+  }
+ },
+ "elites": {
+  "n": 64,
+  "episodes": 10,
+  "food_mean": 32.7703125,
+  "food_std_between": 3.3441497278596466,
+  "food_std_within_mean": 6.8809642507607105,
+  "food_sem_within": 2.1759519530597844,
+  "top8_food": [
+   28.7,
+   34.4,
+   33.0,
+   36.4,
+   39.6,
+   33.2,
+   33.2,
+   34.0
+  ],
+  "top8_reach": [
+   0.819,
+   0.902,
+   0.912,
+   0.9,
+   0.873,
+   0.926,
+   0.914,
+   0.939
+  ],
+  "fitness_tau_vs_food": {
+   "cur_vs_food": 0.9899446958270488,
+   "noreach_vs_food": 1.0,
+   "reach25_vs_food": 0.9446958270487682,
+   "cont_vs_food": 0.9949723479135244
+  },
+  "inversions_count": 0,
+  "inversions_top5": []
+ }
+}
