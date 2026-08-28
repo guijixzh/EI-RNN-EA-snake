@@ -485,13 +485,13 @@ def main():
         ax2.legend(fontsize=8, loc='upper right')
         # B3
         ax = axes[2]
-        ks3 = [int(k[1:]) for k in b3]
+        ks3 = sorted(int(k[1:]) for k in b3)
         w = 0.35
-        ax.bar([i - w / 2 for i in range(len(ks3))],
-               [b3[f'k{k}']['A_ref_to_model_extra'] for k in b3], width=w,
+        av = [b3[f'k{k}']['A_ref_to_model_extra'] for k in ks3]
+        bv = [b3[f'k{k}']['B_model_to_ref_extra'] for k in ks3]
+        ax.bar([i - w / 2 for i in range(len(ks3))], av, width=w,
                label='ref start → model extra food')
-        ax.bar([i + w / 2 for i in range(len(ks3))],
-               [b3[f'k{k}']['B_model_to_ref_extra'] for k in b3], width=w,
+        ax.bar([i + w / 2 for i in range(len(ks3))], bv, width=w,
                label='model start → ref extra food')
         ax.set_xticks(range(len(ks3)))
         ax.set_xticklabels([f'k={k}' for k in ks3])

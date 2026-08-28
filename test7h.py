@@ -123,6 +123,11 @@ class Config:
     # 屏蔽后的成绩 → 训练产物=部署形态。
     WEAK_MASK_FRAC = 0.20
 
+    # --- te-配额精英（行为学研究 B5 对策：精英 te≥2 占比 0% = 选择无料可选）---
+    # 每代从全种群按 te=SL/TL（截断 CAP、要求 food>0）取 TE_ELITE 名插入精英
+    # 尾部（顶替适应度排名最末的精英），保证稀有有序变异体进入繁殖池。
+    TE_ELITE = 0                # 0=关（默认）；建议 24-32
+
     # --- 单侧转弯判死（保持关闭：早期随机个体普遍摇头，判罚干扰初期筛选）---
     ONE_SIDED_TURN_DEATH = False
 
@@ -1125,6 +1130,19 @@ def evolve_topology_gpu(pop, metrics, cfg, gen=0, order=None):
         key_fn = _make_key_fn(cfg)
         order = sorted(range(P), key=lambda i: key_fn(mn[i]), reverse=True)
     elite_idx = order[:cfg.ELITE_SIZE]
+
+    # --- te-配额精英：按 te=SL/TL（截断 CAP，要求 food>0）取配额外最优插入 ---
+    te_quota = int(getattr(cfg, 'TE_ELITE', 0))
+    if te_quota > 0:
+        mn = metrics.cpu().numpy()
+        cap = float(getattr(cfg, 'TURN_EFF_CAP', 4.0))
+        te = np.where((mn[:, 0] > 0) & (mn[:, 10] > 0),
+                      np.minimum(mn[:, 3] / np.maximum(mn[:, 10], 1.0), cap), 0.0)
+        elite_set = set(elite_idx)
+        te_order = sorted(range(P), key=lambda i: te[i], reverse=True)
+        extra = [i for i in te_order if i not in elite_set][:te_quota]
+        if extra:
+            elite_idx = elite_idx[:cfg.ELITE_SIZE - len(extra)] + extra
     elites = pop[elite_idx]
 
     new_pop = pop.empty()
@@ -1329,7 +1347,7 @@ def run_training(cfg):
     print(f"[适应度 v{cfg.FITNESS_VERSION}] food + {cfg.FOOD_EFF_WEIGHT}·eff + "
           f"{cfg.TURN_EFF_W}·min(SL/TL,{cfg.TURN_EFF_CAP:.0f})/{cfg.TURN_EFF_CAP:.0f}"
           f"（{cfg.TURN_EFF_MODE} 口径）| 弱连接屏蔽 "
-          f"W_rec×{1 - cfg.WEAK_MASK_FRAC:.0%}")
+          f"W_rec×{1 - cfg.WEAK_MASK_FRAC:.0%} | te配额精英 {cfg.TE_ELITE}")
     t_program = time.perf_counter()
 
     start_gen = 0
@@ -1738,6 +1756,8 @@ def main():
                     help='转弯效率口径：ratio=SL/TL（默认）| tpf=每食物转弯数（备选）')
     ap.add_argument('--weak-mask-frac', type=float, default=None,
                     help='评估期 W_rec 弱连接屏蔽比例（默认 0.20，0=关）')
+    ap.add_argument('--te-elite', type=int, default=None,
+                    help='te-配额精英数（默认 0=关；行为学 B5 对策）')
     ap.add_argument('--stage1-eps', type=int, default=None,
                     help='阶段1 局数 K1（默认 3）')
     ap.add_argument('--stage2-eps', type=int, default=None,
@@ -1794,6 +1814,8 @@ def main():
         cfg.TURN_EFF_MODE = args.turn_eff_mode
     if args.weak_mask_frac is not None:
         cfg.WEAK_MASK_FRAC = args.weak_mask_frac
+    if args.te_elite is not None:
+        cfg.TE_ELITE = args.te_elite
     if args.stage1_eps is not None:
         cfg.STAGE1_EPS = args.stage1_eps
     if args.stage2_eps is not None:
