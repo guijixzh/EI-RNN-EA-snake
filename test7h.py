@@ -1920,6 +1920,10 @@ def main():
     ap.add_argument('--eval-batch', type=int, default=None)
     ap.add_argument('--seed-model', type=str, default=None,
                     help='指定种子模型路径（单个体注入随机种群，覆盖全种群续训）')
+    ap.add_argument('--resume-pop', type=str, default=None,
+                    help='从任意全种群 checkpoint 导入并续训（复制为本 run 的断点后 AUTO_RESUME）')
+    ap.add_argument('--name', type=str, default=None,
+                    help='本 run 文件名前缀（checkpoint/best/latest/history 独立，默认 econ）')
     ap.add_argument('--play', action='store_true')
     args = ap.parse_args()
 
@@ -1962,6 +1966,24 @@ def main():
         cfg.TE_ELITE = args.te_elite
     if args.imitation_w is not None:
         cfg.IMITATION_W = args.imitation_w
+    if args.name:
+        cfg.CHECKPOINT_PATH = f'test7h_{args.name}_checkpoint.pth'
+        cfg.BEST_MODEL_PATH = f'test7h_{args.name}_best_model.pth'
+        cfg.LATEST_GEN_BEST_MODEL_PATH = f'test7h_{args.name}_latest_gen_best.pth'
+        cfg.HISTORY_JSON_PATH = f'test7h_{args.name}_history.json'
+    if args.resume_pop:
+        payload = torch.load(args.resume_pop, map_location='cpu', weights_only=False)
+        saved = payload.get('config', {})
+        if saved and (saved.get('NUM_COLUMNS') != cfg.NUM_COLUMNS or
+                      saved.get('OBS_DIM') != cfg.OBS_DIM or
+                      saved.get('ACTION_DIM') != cfg.ACTION_DIM):
+            sys.exit(f'[错误] resume-pop {args.resume_pop} 与当前维度不匹配')
+        parent = os.path.dirname(os.path.abspath(cfg.CHECKPOINT_PATH))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        torch.save(payload, cfg.CHECKPOINT_PATH)
+        print(f"[resume-pop] 已导入 {args.resume_pop} "
+              f"(next_gen={payload.get('next_gen')}) -> {cfg.CHECKPOINT_PATH}")
     if args.stage1_eps is not None:
         cfg.STAGE1_EPS = args.stage1_eps
     if args.stage2_eps is not None:
