@@ -128,6 +128,13 @@ class Config:
     # 尾部（顶替适应度排名最末的精英），保证稀有有序变异体进入繁殖池。
     TE_ELITE = 0                # 0=关（默认）；建议 24-32
 
+    # --- 模仿引导（混沌盆地突破：稠密行为梯度，教师=固定回路单调序解法器）---
+    # fitness += IMITATION_W·(1−mismatch)，mismatch=存活步中与教师动作不一致
+    # 的比例（指标列[12]）。教师逻辑向量化，评估零额外扫描成本。
+    # 行为学依据：B3X 证明策略与身体构型共适应、中途换风格必死 → 模仿须从
+    # 出生塑形；te-配额 28 代证明精英池内重组无法转型 → 需要本稠密梯度。
+    IMITATION_W = 0.0           # 0=关（默认）；建议验证 2.0
+
     # --- 单侧转弯判死（保持关闭：早期随机个体普遍摇头，判罚干扰初期筛选）---
     ONE_SIDED_TURN_DEATH = False
 
@@ -252,7 +259,11 @@ def _fitness_econ(m, cfg):
     else:
         te = cap if turns_last <= 0 else min(steps_last / max(turns_last, 1.0), cap)
         te_pts = te / cap
-    return food + float(getattr(cfg, 'FOOD_EFF_WEIGHT', 0.3)) * eff + w * te_pts
+    fit = food + float(getattr(cfg, 'FOOD_EFF_WEIGHT', 0.3)) * eff + w * te_pts
+    iw = float(getattr(cfg, 'IMITATION_W', 0.0))
+    if iw > 0 and len(m) > 12:
+        fit += iw * (1.0 - float(m[12]))       # 模仿项：mismatch 率惩罚
+    return fit
 
 
 def _fitness_tuple(m, cfg):
@@ -311,6 +322,123 @@ def make_bank(cfg, gen, stage, ep, device):
 
 def make_banks(cfg, gen, stage, episodes, device):
     return [make_bank(cfg, gen, stage, e, device) for e in range(episodes)]
+
+
+# ---------- 向量化模仿教师（固定回路 + 单调不变量，与 ref_solver.CycleSolver 同规则）----------
+class VectorCycleTeacher:
+    """批量教师动作 [B]（0直1左2右）。规则：
+    - 安全过滤：界内 & 非颈 & (空|尾(不吃)|食物) & 不变量（吃:fd(h,n)<fd(h,t)，不吃:≤）；
+    - 食物在前向段：安全邻格中 fd(n,food) 最小者；
+    - 食物不在段：回路后继（若安全），否则任一安全（fd 最小）；
+    - 全不安全：维持直行（罕见，mismatch 计入但该步通常即死）。
+    全部 [B,4] 张量操作，每步一次调用。"""
+
+    def __init__(self, grid_size, device):
+        g = grid_size
+        order = []
+        for r in range(g):
+            cols = range(1, g) if r % 2 == 0 else range(g - 1, 0, -1)
+            order += [(r, c) for c in cols]
+        order += [(r, 0) for r in range(g - 1, -1, -1)]
+        self.N = g * g
+        idx = torch.zeros(g, g, dtype=torch.long)
+        for i, (r, c) in enumerate(order):
+            idx[r, c] = i
+        self.idx = idx.to(device)                     # [G,G]
+        self.device = device
+
+    @torch.no_grad()
+    def act(self, head, food, body, body_len, dir_idx, necks):
+        """head/food/body_len/dir_idx [B]；body [B,maxlen,2]；necks [B,2]。"""
+        B = head.shape[0]
+        G = self.idx.shape[0]
+        dev = self.device
+        ar = torch.arange(B, device=dev)
+        h_i = self.idx[head[:, 0], head[:, 1]]
+        t_i = self.idx[body[ar, (body_len - 1).clamp(min=0), 0],
+                       body[ar, (body_len - 1).clamp(min=0), 1]]
+        f_i = self.idx[food[:, 0], food[:, 1]]
+        fd_hf = (f_i - h_i) % self.N
+        fd_ht = (t_i - h_i) % self.N
+
+        # 4 邻格 [B,4]
+        dirs = torch.tensor([[0, 1], [1, 0], [0, -1], [-1, 0]], device=dev)
+        nbr = head.unsqueeze(1) + dirs.unsqueeze(0)               # [B,4,2]
+        inb = ((nbr[:, :, 0] >= 0) & (nbr[:, :, 0] < G) &
+               (nbr[:, :, 1] >= 0) & (nbr[:, :, 1] < G))
+        nbr_c = nbr.clamp(0, G - 1)
+        n_i = self.idx[nbr_c[:, :, 0], nbr_c[:, :, 1]]            # [B,4]
+        # 占用（尾格视为空）
+        flat = body[ar, :, 0] * G + body[ar, :, 1]                # [B,maxlen]
+        valid = torch.arange(body.shape[1], device=dev)[None, :] < body_len[:, None]
+        tail_flat = body[ar, (body_len - 1).clamp(min=0), 0] * G + \
+            body[ar, (body_len - 1).clamp(min=0), 1]
+        occ = torch.zeros(B, G * G, dtype=torch.bool, device=dev)
+        occ.scatter_(1, flat.clamp(max=G * G - 1), valid)
+        occ.scatter_(1, tail_flat.unsqueeze(1), False)
+        nbr_flat = nbr_c[:, :, 0] * G + nbr_c[:, :, 1]
+        n_occ = occ.gather(1, nbr_flat)                            # [B,4]
+        n_food = (nbr[:, :, 0] == food[:, None, 0]) & (nbr[:, :, 1] == food[:, None, 1])
+        is_neck = (nbr[:, :, 0] == necks[:, None, 0]) & (nbr[:, :, 1] == necks[:, None, 1])
+        # 不变量
+        fd_hn = (n_i - h_i.unsqueeze(1)) % self.N                  # [B,4]
+        inv = torch.where(n_food, fd_hn < fd_ht.unsqueeze(1),
+                          fd_hn <= fd_ht.unsqueeze(1))
+        safe = inb & ((~n_occ) | n_food) & inv & (~is_neck)
+
+        # 动作选择
+        big = self.N * 10
+        in_seg = fd_hf < fd_ht
+        # 段内：最小 fd(n,food)；段外：回路后继，否则 fd 最小
+        fd_nf = (f_i.unsqueeze(1) - n_i) % self.N                  # [B,4]
+        cost_in = torch.where(safe, fd_nf, big)
+        succ_i = (h_i + 1) % self.N
+        is_succ = (n_i == succ_i.unsqueeze(1)) & safe
+        cost_out = torch.where(safe, torch.where(is_succ, -1, fd_hn), big)
+        cost = torch.where(in_seg.unsqueeze(1), cost_in, cost_out)
+        best = cost.argmin(dim=1)                                  # [B]
+        any_safe = safe.any(dim=1)
+        # 相对动作：dirs best 与 dir_idx 的差（各 where 均引用原始 raw，防链式污染）
+        want = best                                               # DIRS 索引
+        raw = (want - dir_idx) % 4
+        act = torch.zeros_like(raw)
+        act = torch.where(raw == 0, torch.zeros_like(act), act)    # 直行
+        act = torch.where(raw == 3, torch.ones_like(act), act)     # 左转
+        act = torch.where(raw == 1, torch.full_like(act, 2), act)  # 右转
+        # raw==2（反向）不应出现（颈已从邻格排除）
+        # no-safe 兜底（接管初期身体可能不满足单调不变量）：向量化洪泛，
+        # 选可达空间最大的邻格（语义同标量版 _fallback）
+        bad = ~any_safe
+        if bool(bad.any()):
+            Gg = self.idx.shape[0]
+            occm = (occ > 0).view(B, 1, Gg, Gg)
+            occm[ar, 0, head[:, 0], head[:, 1]] = False           # 头让位
+            free = (~occm).to(torch.float32)
+            free[free > 0] = 0                                    # 先全零再播种
+            free = torch.zeros_like(free)
+            free[ar, 0, head[:, 0], head[:, 1]] = 1.0             # 洪泛种子=头
+            wall = occm.to(torch.float32)
+            mp = torch.nn.functional.max_pool2d
+            for _ in range(Gg * Gg):
+                cross = torch.maximum(mp(free, (3, 1), stride=1, padding=(1, 0)),
+                                      mp(free, (1, 3), stride=1, padding=(0, 1)))
+                free = cross * (1.0 - wall)
+            best_sz = None
+            fb_act = torch.zeros_like(act)
+            for di in range(4):
+                nr = nbr[:, di, 0].clamp(0, Gg - 1)
+                nc = nbr[:, di, 1].clamp(0, Gg - 1)
+                sz = free[ar, 0, nr, nc] + inb[:, di].to(torch.float32) * 1e-3
+                sz = torch.where(bad, sz, torch.full_like(sz, -1.0))
+                if di == 0:
+                    best_sz = sz
+                    fb_act = torch.full_like(fb_act, di)
+                else:
+                    take = sz > best_sz
+                    fb_act = torch.where(take, torch.full_like(fb_act, di), fb_act)
+                    best_sz = torch.where(take, sz, best_sz)
+            act = torch.where(bad, fb_act, act)
+        return act
 
 
 # ==========================================
@@ -960,6 +1088,10 @@ def _eval_sweep_chunk(pop_rep, cfg, bank):
     last = torch.zeros(B, dtype=torch.float32, device=dev)
     turn_cnt = torch.zeros(B, dtype=torch.float32, device=dev)
     turn_last = torch.zeros(B, dtype=torch.float32, device=dev)
+    use_im = float(getattr(cfg, 'IMITATION_W', 0.0)) > 0
+    teacher = VectorCycleTeacher(cfg.GRID_SIZE, dev)   # mismatch 恒追踪（代价可忽略）
+    mis_cnt = torch.zeros(B, dtype=torch.float32, device=dev)
+    mis_steps = torch.zeros(B, dtype=torch.float32, device=dev)
 
     for t in range(cfg.MAX_STEPS):
         al = env.alive
@@ -974,6 +1106,13 @@ def _eval_sweep_chunk(pop_rep, cfg, bank):
 
         act, E, I, st = deliberate_batch(pop_rep, obs, E, I, st, press, cfg)
         press = update_fatigue(press, act, decay=float(cfg.FATIGUE_TURN_DECAY))
+        if teacher is not None:
+            ar = torch.arange(B, device=dev)
+            necks = env.body[ar, 1]
+            t_act = teacher.act(env.head, env.food, env.body, env.body_len,
+                                env.dir_idx, necks)
+            mis_cnt += (al & (act != t_act)).float()
+            mis_steps += al.float()
         tot_act1 += (al & (act == 1)).float()
         tot_act2 += (al & (act == 2)).float()
         turn_cnt += (al & (act != 0)).float()
@@ -992,11 +1131,13 @@ def _eval_sweep_chunk(pop_rep, cfg, bank):
 
     prox = tot_prox / torch.clamp(tot_seen + tot_unseen, min=1e-6)
     avg_reach = tot_reach / tot_reach_n.clamp(min=1.0)
+    mismatch = mis_cnt / mis_steps.clamp(min=1.0)
     metrics = torch.stack((tot_food, tot_seen, tot_unseen, last, prox,
                            tot_wall + (env.died == 1).float(),
                            tot_self + (env.died == 2).float(),
                            tot_starve + (env.died == 3).float(),
-                           tot_act1, tot_act2, turn_last, avg_reach), dim=1)
+                           tot_act1, tot_act2, turn_last, avg_reach,
+                           mismatch), dim=1)
     return metrics
 
 
@@ -1030,7 +1171,7 @@ def _eval_pop_banks(pop, cfg, banks):
     """E=len(banks) 局并行评估：个体×E 复制进同一批扫描（局维折叠，扫描次数
     不随局数增长——GPU 利用率低时墙上时间 ∝ 扫描次数而非局数）。
     所有分块共用同一组 banks（CRN 关键）；评估副本先做弱连接屏蔽。
-    返回 [P,12] = E 局均值。"""
+    返回 [P,13] = E 局均值（列12=mismatch 率）。"""
     E = len(banks)
     dev = pop.device
     use_crn = banks[0] is not None
@@ -1042,7 +1183,8 @@ def _eval_pop_banks(pop, cfg, banks):
         bank = None
     max_B = _auto_eval_batch(cfg, dev)
     per_P = max(1, max_B // E)
-    out = torch.zeros(pop.P, 12)
+    ncol = 13
+    out = torch.zeros(pop.P, ncol)
     for lo in range(0, pop.P, per_P):
         hi = min(lo + per_P, pop.P)
         n = hi - lo
@@ -1051,7 +1193,7 @@ def _eval_pop_banks(pop, cfg, banks):
         apply_weak_mask(sub, cfg)
         sub.refresh_eff()
         m = _eval_sweep_chunk(sub, cfg, bank).cpu()
-        out[lo:hi] = m.view(E, n, 12).mean(dim=0)
+        out[lo:hi] = m.view(E, n, ncol).mean(dim=0)
     return out
 
 
@@ -1059,7 +1201,7 @@ def evaluate_population_gpu(pop, cfg, gen=0):
     """两阶段淘汰评估（CRN）：
     阶段1：全种群 × K1 局（同库精确可比）→ 保前 STAGE2_KEEP；
     阶段2：幸存者 × K2 局（新库），幸存者指标 = (K1·m1 + K2·m2)/(K1+K2)。
-    返回 (metrics[P,12], order[P])：order = 幸存者按累计适应度降序，
+    返回 (metrics[P,13], order[P])：order = 幸存者按累计适应度降序，
     其后为落选者按阶段1适应度降序——精英只能出自幸存者。
     """
     if getattr(cfg, 'USE_FP16', True):
@@ -1362,7 +1504,7 @@ def run_training(cfg):
     best_unseen = 0.0
     best_last = 0.0
     best_prox = 0.0
-    best_row = np.zeros(12)
+    best_row = np.zeros(13)
     best_row[1] = 99999.0
     latest_gen_best_state = None
     latest_gen_best_food = -1.0
@@ -1390,7 +1532,7 @@ def run_training(cfg):
             best_unseen = float(ck.get('best_unseen', 0.0))
             best_last = float(ck.get('best_last', 0.0))
             best_prox = float(ck.get('best_prox', 0.0))
-            best_row = np.zeros(12)
+            best_row = np.zeros(13)
             best_row[1] = 99999.0
             if 'best_row' in ck:
                 best_row = np.asarray(ck['best_row'], dtype=np.float64)
@@ -1400,7 +1542,7 @@ def run_training(cfg):
             # 适应度版本变化 → 旧 best 行跨公式不可比，重置追踪（history 保留）
             ck_ver = int(ck.get('config', {}).get('FITNESS_VERSION', 1))
             if ck_ver != int(getattr(cfg, 'FITNESS_VERSION', 1)):
-                best_row = np.zeros(12)
+                best_row = np.zeros(13)
                 best_row[1] = 99999.0
                 best_state = None
                 best_food = -1.0
@@ -1758,6 +1900,8 @@ def main():
                     help='评估期 W_rec 弱连接屏蔽比例（默认 0.20，0=关）')
     ap.add_argument('--te-elite', type=int, default=None,
                     help='te-配额精英数（默认 0=关；行为学 B5 对策）')
+    ap.add_argument('--imitation-w', type=float, default=None,
+                    help='模仿引导权重（默认 0=关；建议 2.0）')
     ap.add_argument('--stage1-eps', type=int, default=None,
                     help='阶段1 局数 K1（默认 3）')
     ap.add_argument('--stage2-eps', type=int, default=None,
@@ -1816,6 +1960,8 @@ def main():
         cfg.WEAK_MASK_FRAC = args.weak_mask_frac
     if args.te_elite is not None:
         cfg.TE_ELITE = args.te_elite
+    if args.imitation_w is not None:
+        cfg.IMITATION_W = args.imitation_w
     if args.stage1_eps is not None:
         cfg.STAGE1_EPS = args.stage1_eps
     if args.stage2_eps is not None:
