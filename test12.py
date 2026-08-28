@@ -1,5 +1,29 @@
 # ==========================================
-# test7h.py —— CRN 精确筛选 + 两阶段淘汰 + 类正态变异版（基于 test7g，诊断驱动）
+# test12.py —— 基于 test7h 的改版：绝对方位食物编码 + 孤岛惩罚
+#
+# 相对 test7h 的两处改动：
+#  1. 食物感知重写（obs[8:16]，保持 32 维，OBS_ENC_VERSION='32ego1'）：
+#     - [8:12] 4 相对方位信号 ×K（前/右/后/左，随头转）：sig=clamp(û·dir,0,1)×K。
+#       食物恰在该方向直线上 → 信号 ≈K；斜 45° → 相邻两方向各 ≈0.707K；
+#       与 7h 扇区同为自体系、同输入量级（对准 ≈K）；
+#     - [12:16] 4 相对方位距离倒数：sig×K/曼哈顿距离。与方位信号联合可精确
+#       恢复食物相对向量（方位+距离双通道）。替换原 8 扇区曼哈顿投影。
+#     编码演进（对照实验定位，experiments/diag_test12_vs_7h.py）：
+#       v1 绝对系+原始 sig → 卡 1.0；v2 绝对系+sig×K → 仍卡 1.0（量级无关）；
+#       v3(本版) 相对系——绝对系要求网络先学会 绝对方位⊗头朝向 绑定，
+#       随机初网络零初始相关、选择无梯度。'abs' 帧保留为 Config 开关。
+#  2. 孤岛惩罚（FITNESS_VERSION 3）：过程中（每次吃食采样点）蛇头可达
+#     空间 < ISLAND_THRESHOLD×(总空间−蛇长) 记该局触发，metrics 列 [13]
+#     min_reach、[14] 局触发率；适应度按触发率线性折减
+#     fit ×= 1−(1−ISLAND_PENALTY)·rate（=局级 ×pen 跨局平均的一阶形式；
+#     v1 的'任一局触发即整体 ×0.1'实测与食物数正相关、反向压选择，已废）。
+#     动机：7h 系行为学结论"主死因=空间挤压自撞"，排除分割空间与进入
+#     孤岛的倾向。复用 reach_ratio 洪泛填充（分母即自由格数）。
+#  3. checkpoint 新增 OBS_ENC_VERSION 校验：7h 旧 checkpoint 观测编码
+#     不同但维度相同，resume-pop/seed-model 时按编码版本拒绝，须用新 run。
+#
+# ==========================================
+# 以下为 test7h 原始说明（CRN 精确筛选 + 两阶段淘汰 + 类正态变异，基于 test7g）
 #
 # v2（解法器基准校准，experiments/solver_reference.py）：
 #  - 适应度转弯效率升为一等力量：W 0.5→3.0、CAP 8→4（ratio 口径 SL/TL）。
@@ -102,7 +126,25 @@ class Config:
     FIT_MODE = 'econ'
 
     # --- 适应度版本（公式变更时 +1；断点版本不一致则重置 best 追踪）---
-    FITNESS_VERSION = 2
+    FITNESS_VERSION = 3
+
+    # --- 孤岛惩罚（test12）：按各局触发率线性折减 fit×(1−(1−pen)·rate) ---
+    # reach_ratio 分母=自由格数（总空间−蛇长），即"蛇头可达空间 < 30% 自由格"。
+    # 采样点=每次吃食（复用 avg_reach 统计点，零额外洪泛成本）。rate=1（全程
+    # 触发）→ ×pen；rate=0 → 不罚。pen=1.0 关闭。
+    ISLAND_THRESHOLD = 0.3
+    ISLAND_PENALTY = 0.1
+
+    # --- 观测编码版本（'32ego1'=test12 相对方位+距离通道；'32proj'=test7h 扇区投影）---
+    # checkpoint 校验用：7h 与 12 维度同为 32，仅凭 OBS_DIM 无法区分。
+    # v1('32abs') 绝对系 sig 驱动不足；v2('32abs2') 绝对系 ×K 仍卡 1.0；
+    # 本版改相对系（帧对照实证：绝对系要求网络先学会 绝对方位⊗头朝向 绑定，
+    # 随机初网络零初始相关、选择无梯度）。改 OBS_FOOD_FRAME 须换新 run。
+    OBS_ENC_VERSION = '32ego1'
+
+    # --- 食物方位参照系：'ego'=前/右/后/左（默认，随头转；与 7h 扇区同系）---
+    #   | 'abs'=绝对 E/S/W/N（原始需求，保留开关；实测从零训练选择无梯度）
+    OBS_FOOD_FRAME = 'ego'
 
     # --- econ：fitness = food + W_e·eff + W_t·min(SL/TL, CAP)/CAP ---
     FOOD_EFF_WEIGHT = 0.3   # 吃子效率权重（7b 验证量级，防固定回路退化）
@@ -134,7 +176,6 @@ class Config:
     # 行为学依据：B3X 证明策略与身体构型共适应、中途换风格必死 → 模仿须从
     # 出生塑形；te-配额 28 代证明精英池内重组无法转型 → 需要本稠密梯度。
     IMITATION_W = 0.0           # 0=关（默认）；建议验证 2.0
-    TEACHER_STARVE = False      # 教师饿死感知捷径（预算不足时放宽不变量强行追食）
 
     # --- 单侧转弯判死（保持关闭：早期随机个体普遍摇头，判罚干扰初期筛选）---
     ONE_SIDED_TURN_DEATH = False
@@ -246,6 +287,8 @@ def _fitness_econ(m, cfg):
       饱和 → 长直段折叠拿满，不被压制；
     - turns_last=0 且 food>0 → 效率取 CAP（全程直行=完美）。
     m 列：0 food, 1 seen, 2 unseen, 3 steps_last, 10 turns_last
+    test12 追加列：13 min_reach, 14 island_flag（任一采样点 min_reach<
+    ISLAND_THRESHOLD×自由格）→ 适应度 ×ISLAND_PENALTY。
     """
     if m[1] >= 99999:
         return -1e9
@@ -264,6 +307,14 @@ def _fitness_econ(m, cfg):
     iw = float(getattr(cfg, 'IMITATION_W', 0.0))
     if iw > 0 and len(m) > 12:
         fit += iw * (1.0 - float(m[12]))       # 模仿项：mismatch 率惩罚
+    # 孤岛惩罚（test12，按局触发率线性折减）：fit ×= (1−(1−pen)·rate)，
+    # rate∈[0,1] 为各局 island 触发比例。等价于"局级 ×pen 后跨局平均"的一阶
+    # 形式，消除 v1 的'13 局任一触发即整体 ×0.1'一票否决——实测该实现惩罚
+    # 与食物数正相关（教师解法器 47.5% 局触发、且触发局 food≈98），选择被
+    # 反向压向'只吃 1 食'。
+    if len(m) > 14:
+        pen = float(getattr(cfg, 'ISLAND_PENALTY', 0.1))
+        fit *= 1.0 - (1.0 - pen) * float(m[14])
     return fit
 
 
@@ -349,11 +400,8 @@ class VectorCycleTeacher:
         self.device = device
 
     @torch.no_grad()
-    def act(self, head, food, body, body_len, dir_idx, necks, swof=None,
-            starve_slope=3.0):
-        """head/food/body_len/dir_idx [B]；body [B,maxlen,2]；necks [B,2]。
-        swof 给定时启用饿死感知：budget=starve_slope·L+20−swof < fd(head,food)+2
-        → 跟回路必饿死，放宽不变量（保留几何安全：界内/非颈/不撞身）强行追食。"""
+    def act(self, head, food, body, body_len, dir_idx, necks):
+        """head/food/body_len/dir_idx [B]；body [B,maxlen,2]；necks [B,2]。"""
         B = head.shape[0]
         G = self.idx.shape[0]
         dev = self.device
@@ -388,15 +436,7 @@ class VectorCycleTeacher:
         fd_hn = (n_i - h_i.unsqueeze(1)) % self.N                  # [B,4]
         inv = torch.where(n_food, fd_hn < fd_ht.unsqueeze(1),
                           fd_hn <= fd_ht.unsqueeze(1))
-        geo_safe = inb & ((~n_occ) | n_food) & (~is_neck)
-        # 饿死感知：预算不足 → 放弃不变量、仅保留几何安全
-        if swof is not None:
-            budget = starve_slope * body_len.float().reshape(-1) + 20.0 \
-                - swof.to(torch.float32).reshape(-1)
-            chase = budget < fd_hf.to(torch.float32) + 2.0
-            safe = torch.where(chase.unsqueeze(1), geo_safe, geo_safe & inv)
-        else:
-            safe = geo_safe & inv
+        safe = inb & ((~n_occ) | n_food) & inv & (~is_neck)
 
         # 动作选择
         big = self.N * 10
@@ -407,13 +447,7 @@ class VectorCycleTeacher:
         succ_i = (h_i + 1) % self.N
         is_succ = (n_i == succ_i.unsqueeze(1)) & safe
         cost_out = torch.where(safe, torch.where(is_succ, -1, fd_hn), big)
-        chase_any = None
-        try:
-            chase_any = chase
-        except NameError:
-            pass
-        sel_in = in_seg if chase_any is None else (in_seg | chase_any)
-        cost = torch.where(sel_in.unsqueeze(1), cost_in, cost_out)
+        cost = torch.where(in_seg.unsqueeze(1), cost_in, cost_out)
         best = cost.argmin(dim=1)                                  # [B]
         any_safe = safe.any(dim=1)
         # 相对动作：dirs best 与 dir_idx 的差（各 where 均引用原始 raw，防链式污染）
@@ -846,28 +880,41 @@ class BatchedSnakeEnv:
             d + right,                   # 7 右前
         ]
 
-        # --- [8:16] 食物 8 扇区投影 ---
-        # 曼哈顿一致（默认）：û 原始整数向量，分母 (|dr|+|dc|)²，同 d1 最强扇区
-        #   信号恒等于 K/d1²，与方位无关（欧氏对角偏置 √2 已验证为错误启发）。
-        # 欧氏分支仅为 pre-7g 模型（如 7b）诊断评估保留，训练不得使用。
-        ar = torch.arange(B, device=dev)
+        # --- [8:16] 食物方位+距离编码（test12 v3，OBS_ENC_VERSION='32ego1'）---
+        # [8:12] 4 方位信号 ×K：sig=clamp(û·基方向,0,1)×K。对准 ≈K（与 7h 投影
+        #   对准扇区恒 ≈K 同输入量级）；斜 45° → 相邻两方向各 ≈0.707K；
+        # [12:16] 距离倒数：sig×K/曼哈顿距离 → 与方位信号联合可线性恢复食物
+        #   相对向量（方位通道 + 距离通道，均精确）。
+        # 方向基（随 OBS_FOOD_FRAME 切换）：
+        #   'ego'（默认）: 前/右/后/左，随头转——与 7h 扇区同自体系；实证绝对系
+        #     （'abs'）要求网络先学会 绝对方位⊗头朝向 绑定，随机初网络零初始
+        #     相关、选择无梯度（12 代 best food 钉死 ~1.0，惩罚开关无关）。
         vr = (food[:, 0] - head[:, 0]).float()
         vc = (food[:, 1] - head[:, 1]).float()
-        manhattan = bool(getattr(self.cfg, 'OBS_MANHATTAN', True))
-        d2 = ((vr.abs() + vc.abs()).clamp(min=1.0)) if manhattan else \
-             (vr * vr + vc * vc).clamp(min=1.0)
+        dist = (vr.abs() + vc.abs()).clamp(min=1.0)
         k_scale = float(getattr(self.cfg, 'OBS_FOOD_SCALE', 1.0))
-        for i in range(8):
-            dx = d8[i][:, 0].float()
-            dy = d8[i][:, 1].float()
-            if manhattan:
-                dot = vr * dx + vc * dy                  # û 原始整数向量
-            else:
-                norm = torch.sqrt(dx * dx + dy * dy)     # 1 或 √2
-                dot = (vr * dx + vc * dy) / norm
-            obs[:, 8 + i] = torch.clamp(dot, min=0.0) / d2 * k_scale
+        if str(getattr(self.cfg, 'OBS_FOOD_FRAME', 'ego')) == 'abs':
+            dirs = ((0, 1), (1, 0), (0, -1), (-1, 0))   # 绝对 E/S/W/N
+        else:
+            r_ = self.DIRS[(self.dir_idx + 1) % 4]
+            l_ = self.DIRS[(self.dir_idx + 3) % 4]
+            dirs = ((d[:, 0], d[:, 1]), (r_[:, 0], r_[:, 1]),
+                    (-d[:, 0], -d[:, 1]), (l_[:, 0], l_[:, 1]))
+        for i, (ax, ay) in enumerate(dirs):
+            axf = ax.float() if torch.is_tensor(ax) else float(ax)
+            ayf = ay.float() if torch.is_tensor(ay) else float(ay)
+            sig = torch.clamp(vr * axf + vc * ayf, min=0.0) / dist
+            obs[:, 8 + i] = sig * k_scale
+            obs[:, 12 + i] = sig * k_scale / dist
+        for i, (ax, ay) in enumerate(dirs):
+            axf = ax.float() if torch.is_tensor(ax) else float(ax)
+            ayf = ay.float() if torch.is_tensor(ay) else float(ay)
+            sig = torch.clamp(vr * axf + vc * ayf, min=0.0) / dist
+            obs[:, 8 + i] = sig * k_scale
+            obs[:, 12 + i] = sig * k_scale / dist
 
         # --- [16:24] 自身 8 扇区距离倒数 ---
+        ar = torch.arange(B, device=dev)
         flat_body = self.body[:, :, 0] * G + self.body[:, :, 1]
         seg_idx = torch.arange(self.MAXLEN, device=dev)
         seg_valid = (seg_idx[None, :] >= 1) & (seg_idx[None, :] < self.body_len[:, None])
@@ -1098,6 +1145,7 @@ def _eval_sweep_chunk(pop_rep, cfg, bank):
     tot_turn_last = torch.zeros(B, dtype=torch.float32, device=dev)
     tot_reach = torch.zeros(B, dtype=torch.float32, device=dev)
     tot_reach_n = torch.zeros(B, dtype=torch.float32, device=dev)
+    min_reach = torch.full((B,), 1e9, dtype=torch.float32, device=dev)
 
     E = torch.zeros(B, N, dtype=half, device=dev)
     I = torch.zeros(B, N, dtype=half, device=dev)
@@ -1128,9 +1176,7 @@ def _eval_sweep_chunk(pop_rep, cfg, bank):
             ar = torch.arange(B, device=dev)
             necks = env.body[ar, 1]
             t_act = teacher.act(env.head, env.food, env.body, env.body_len,
-                                env.dir_idx, necks,
-                                swof=env.steps_wo_food if getattr(cfg, 'TEACHER_STARVE', False) else None,
-                                starve_slope=float(getattr(cfg, 'STARVE_SLOPE', 3.0)))
+                                env.dir_idx, necks)
             mis_cnt += (al & (act != t_act)).float()
             mis_steps += al.float()
         tot_act1 += (al & (act == 1)).float()
@@ -1146,18 +1192,22 @@ def _eval_sweep_chunk(pop_rep, cfg, bank):
             rr = reach_ratio(env)
             tot_reach += rr * ate_now.float()
             tot_reach_n += ate_now.float()
+            # 孤岛惩罚统计（test12）：过程中可达空间最小占比（分母=自由格数）
+            min_reach = torch.where(ate_now & (rr < min_reach), rr, min_reach)
         if env.all_done():
             break
 
     prox = tot_prox / torch.clamp(tot_seen + tot_unseen, min=1e-6)
     avg_reach = tot_reach / tot_reach_n.clamp(min=1.0)
     mismatch = mis_cnt / mis_steps.clamp(min=1.0)
+    island = ((min_reach < float(getattr(cfg, 'ISLAND_THRESHOLD', 0.3)))
+              & (tot_reach_n > 0)).float()
     metrics = torch.stack((tot_food, tot_seen, tot_unseen, last, prox,
                            tot_wall + (env.died == 1).float(),
                            tot_self + (env.died == 2).float(),
                            tot_starve + (env.died == 3).float(),
                            tot_act1, tot_act2, turn_last, avg_reach,
-                           mismatch), dim=1)
+                           mismatch, min_reach.clamp(max=1.0), island), dim=1)
     return metrics
 
 
@@ -1191,7 +1241,7 @@ def _eval_pop_banks(pop, cfg, banks):
     """E=len(banks) 局并行评估：个体×E 复制进同一批扫描（局维折叠，扫描次数
     不随局数增长——GPU 利用率低时墙上时间 ∝ 扫描次数而非局数）。
     所有分块共用同一组 banks（CRN 关键）；评估副本先做弱连接屏蔽。
-    返回 [P,13] = E 局均值（列12=mismatch 率）。"""
+    返回 [P,15] = E 局均值（列12=mismatch 率，13=min_reach，14=island_flag）。"""
     E = len(banks)
     dev = pop.device
     use_crn = banks[0] is not None
@@ -1203,7 +1253,7 @@ def _eval_pop_banks(pop, cfg, banks):
         bank = None
     max_B = _auto_eval_batch(cfg, dev)
     per_P = max(1, max_B // E)
-    ncol = 13
+    ncol = 15
     out = torch.zeros(pop.P, ncol)
     for lo in range(0, pop.P, per_P):
         hi = min(lo + per_P, pop.P)
@@ -1221,7 +1271,7 @@ def evaluate_population_gpu(pop, cfg, gen=0):
     """两阶段淘汰评估（CRN）：
     阶段1：全种群 × K1 局（同库精确可比）→ 保前 STAGE2_KEEP；
     阶段2：幸存者 × K2 局（新库），幸存者指标 = (K1·m1 + K2·m2)/(K1+K2)。
-    返回 (metrics[P,13], order[P])：order = 幸存者按累计适应度降序，
+    返回 (metrics[P,15], order[P])：order = 幸存者按累计适应度降序，
     其后为落选者按阶段1适应度降序——精英只能出自幸存者。
     """
     if getattr(cfg, 'USE_FP16', True):
@@ -1418,6 +1468,10 @@ def load_best_state(path, cfg):
                 saved_cfg.get('ACTION_DIM') != cfg.ACTION_DIM):
             print(f"  警告: 模型 {path} 与当前配置不匹配 (N/OBS/ACTION_DIM)，已忽略种子")
             return None
+        if saved_cfg.get('OBS_ENC_VERSION', '32proj') != getattr(cfg, 'OBS_ENC_VERSION', '32proj'):
+            print(f"  警告: 模型 {path} 观测编码不符 "
+                  f"({saved_cfg.get('OBS_ENC_VERSION')} != {cfg.OBS_ENC_VERSION})，已忽略种子")
+            return None
     st = data.get('brain')
     if st is None:
         return None
@@ -1443,6 +1497,50 @@ def save_history_json(path, history):
         os.makedirs(parent, exist_ok=True)
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(history, f, ensure_ascii=False)
+
+
+def load_notify_token():
+    """AutoDL 开发者 Token：优先读脚本同目录/工作目录的 notify_token.txt，
+    其次环境变量 AUTODL_TOKEN。找不到（或内容明显不是 Token）返回 None（静默跳过通知）。"""
+    def _valid(t):
+        # 真 Token 为 ASCII 串；含空白/中文说明还是占位说明文本，视同未配置
+        return bool(t) and t.isascii() and not any(c.isspace() for c in t)
+    here = os.path.dirname(os.path.abspath(__file__))
+    for p in (os.path.join(here, 'notify_token.txt'),
+              'notify_token.txt'):
+        try:
+            if os.path.exists(p):
+                with open(p, 'r', encoding='utf-8') as f:
+                    tok = f.read().strip()
+                if _valid(tok):
+                    return tok
+        except Exception:
+            pass
+    env = os.environ.get('AUTODL_TOKEN', '').strip()
+    return env if _valid(env) else None
+
+
+def send_autodl_notify(cfg, title, content):
+    """AutoDL 微信通知（api.autodl.com/docs/msg）。仅完成时调用一次；
+    任何失败只打印警告，绝不影响训练结果。"""
+    tok = load_notify_token()
+    if not tok:
+        print("[通知] 未找到 notify_token.txt / AUTODL_TOKEN，跳过微信通知")
+        return
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            'https://www.autodl.com/api/v1/wechat/message/send',
+            data=json.dumps({'title': title[:20], 'name': 'test12 贪吃蛇进化',
+                             'content': content[:200]}).encode('utf-8'),
+            headers={'Content-Type': 'application/json',
+                     'Authorization': tok},
+            method='POST')
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = resp.read().decode('utf-8', 'replace')
+        print(f"[通知] AutoDL 微信通知已发送: {body[:120]}")
+    except Exception as e:
+        print(f"[通知] 微信通知发送失败（不影响训练）: {e}")
 
 
 def save_checkpoint7(path, cfg, next_gen, pop, history,
@@ -1489,6 +1587,10 @@ def load_checkpoint7(path, cfg):
                       saved_cfg.get('ACTION_DIM') != cfg.ACTION_DIM):
         print(f"  警告: 断点 {path} 与当前配置不匹配 (N/OBS/ACTION_DIM)，已忽略")
         return None
+    if saved_cfg and saved_cfg.get('OBS_ENC_VERSION', '32proj') != getattr(cfg, 'OBS_ENC_VERSION', '32proj'):
+        print(f"  警告: 断点 {path} 观测编码不符 "
+              f"({saved_cfg.get('OBS_ENC_VERSION')} != {cfg.OBS_ENC_VERSION})，已忽略")
+        return None
     return data
 
 
@@ -1510,6 +1612,8 @@ def run_training(cfg):
           f"{cfg.TURN_EFF_W}·min(SL/TL,{cfg.TURN_EFF_CAP:.0f})/{cfg.TURN_EFF_CAP:.0f}"
           f"（{cfg.TURN_EFF_MODE} 口径）| 弱连接屏蔽 "
           f"W_rec×{1 - cfg.WEAK_MASK_FRAC:.0%} | te配额精英 {cfg.TE_ELITE}")
+    print(f"[test12] obs={cfg.OBS_ENC_VERSION} | 孤岛惩罚：min_reach<"
+          f"{cfg.ISLAND_THRESHOLD} → ×{cfg.ISLAND_PENALTY}")
     t_program = time.perf_counter()
 
     start_gen = 0
@@ -1737,6 +1841,15 @@ def run_training(cfg):
     except Exception as e:
         print(f"(matplotlib 曲线跳过: {e})")
 
+    # ---- 训练数据与图表落盘后：AutoDL 微信通知（仅此一次）----
+    n_gens = len(history.get('gen', []))
+    last_fit = history.get('best_fit', [float('nan')])[-1] if history.get('best_fit') else float('nan')
+    send_autodl_notify(
+        cfg, 'test12 训练完成',
+        f"gens={n_gens} best_food={best_food:.2f} best_fit={last_fit:.2f} "
+        f"seen={best_seen:.1f} 用时{(time.perf_counter() - t_program) / 3600:.2f}h。"
+        f"产物: {cfg.BEST_MODEL_PATH} / history.json+png / checkpoint")
+
     print(f"\n--- Best Brain Summary ---")
     st = best_state
     print(f"Input connections active:   {st['M_in'].sum().item()}/{pop.N * pop.O}")
@@ -1801,7 +1914,57 @@ def play_best(cfg, max_steps=300):
 # 8. 自检（CRN 确定性 / 变异分布 / 适应度公式）
 # ==========================================
 def selfcheck(cfg):
-    print("=== 自检 1：适应度公式（v2：ratio W=3 CAP=4）===")
+    print("=== 自检 0：test12 食物方位+距离编码（相对系 ego）===")
+    dev = _resolve_device(cfg)
+    sc0 = Config()
+    sc0.DEVICE = cfg.DEVICE
+    torch.manual_seed(3)
+    env0 = BatchedSnakeEnv(sc0, 4, dev)
+    env0.reset()
+    env0.head = torch.tensor([[5, 5]] * 4, device=dev)
+    env0.dir_idx = torch.zeros(4, dtype=torch.long, device=dev)   # 全体朝 E：前/右/后/左 = E/S/W/N
+    # 依次：正前 d=3 | 右前方 (vr,vc)=(2,1) d=3 | 右前对角 (4,4) d=8 | 正左 (0,-4)
+    env0.food = torch.tensor([[5, 8], [7, 6], [9, 9], [1, 5]], device=dev)
+    obs0 = env0._obs32().float()
+    K = float(sc0.OBS_FOOD_SCALE)
+    ok0 = True
+    def _chk(label, got, want, tol=1e-5):
+        nonlocal ok0
+        good = abs(got - want) < tol
+        ok0 = ok0 and good
+        print(f"  {label}: {got:.4f} (期望 {want:.4f}) {'OK' if good else 'FAIL'}")
+    _chk("正前 方向信号[8]", float(obs0[0, 8]), K)
+    _chk("正前 距离倒数[12]", float(obs0[0, 12]), K / 3.0)
+    _chk("右前方 信号右[9]", float(obs0[1, 9]), 2.0 * K / 3.0)
+    _chk("右前方 信号前[8]", float(obs0[1, 8]), K / 3.0)
+    _chk("右前方 倒数右[13]", float(obs0[1, 13]), (2.0 / 3.0) * K / 3.0)
+    _chk("右前对角 双信号[8]", float(obs0[2, 8]), 0.5 * K)
+    _chk("右前对角 双信号[9]", float(obs0[2, 9]), 0.5 * K)
+    _chk("右前对角 倒数[12]", float(obs0[2, 12]), 0.5 * K / 8.0)
+    _chk("正左 信号左[11]", float(obs0[3, 11]), K)
+    _chk("正左 前无信号[8]", float(obs0[3, 8]), 0.0)
+    # 转身不变性：朝 W 时正前(E)食物应从"前"转到"后"通道
+    env0.dir_idx = torch.full((4,), 2, dtype=torch.long, device=dev)   # 朝 W
+    obs1 = env0._obs32().float()
+    _chk("朝W 正前食物→信号后[10]", float(obs1[0, 10]), K)
+    _chk("朝W 正前食物→前无信号[8]", float(obs1[0, 8]), 0.0)
+
+    print("=== 自检 0b：孤岛惩罚（按局触发率线性折减）===")
+    mi = np.zeros(15)
+    mi[0], mi[3], mi[10] = 10.0, 100.0, 0.0
+    f_no = _fitness_econ(mi, cfg)
+    pen = float(cfg.ISLAND_PENALTY)
+    ok0b = True
+    for rate in (1.0, 0.5, 0.0):
+        mi[14] = rate
+        f = _fitness_econ(mi, cfg)
+        want = f_no * (1.0 - (1.0 - pen) * rate)
+        good = abs(f - want) < 1e-9
+        ok0b = ok0b and good
+        print(f"  触发率{rate:.1f}: {f:.4f} (期望 {want:.4f}) {'OK' if good else 'FAIL'}")
+    print(f"  孤岛惩罚分级 {'OK' if ok0b else 'FAIL'}")
+
+    print("=== 自检 1：适应度公式（v3：ratio W=3 CAP=4）===")
     m = np.zeros(12)
     m[0], m[3], m[10] = 10.0, 100.0, 10.0   # food=10, SL=100, TL=10 → te=10→cap
     f1 = _fitness_econ(m, cfg)
@@ -1885,10 +2048,10 @@ def make_smoke_config():
     cfg.MAX_STEPS = 60
     cfg.FRAME_RATE = 2
     cfg.CHECKPOINT_INTERVAL = 2
-    cfg.CHECKPOINT_PATH = 'test7h_smoke_checkpoint.pth'
-    cfg.BEST_MODEL_PATH = 'test7h_smoke_best.pth'
-    cfg.LATEST_GEN_BEST_MODEL_PATH = 'test7h_smoke_latest_gen_best.pth'
-    cfg.HISTORY_JSON_PATH = 'test7h_smoke_history.json'
+    cfg.CHECKPOINT_PATH = 'test12_smoke_checkpoint.pth'
+    cfg.BEST_MODEL_PATH = 'test12_smoke_best.pth'
+    cfg.LATEST_GEN_BEST_MODEL_PATH = 'test12_smoke_latest_gen_best.pth'
+    cfg.HISTORY_JSON_PATH = 'test12_smoke_history.json'
     cfg.SEED_FROM_BEST = False
     cfg.EVAL_BATCH = 16
     cfg.PRINT_HISTORY_EVERY = 1
@@ -1922,6 +2085,10 @@ def main():
                     help='te-配额精英数（默认 0=关；行为学 B5 对策）')
     ap.add_argument('--imitation-w', type=float, default=None,
                     help='模仿引导权重（默认 0=关；建议 2.0）')
+    ap.add_argument('--island-threshold', type=float, default=None,
+                    help='孤岛判定阈值：min_reach<阈值×自由格 触发（默认 0.3）')
+    ap.add_argument('--island-penalty', type=float, default=None,
+                    help='孤岛适应度罚因子（默认 0.1；1.0=关闭）')
     ap.add_argument('--stage1-eps', type=int, default=None,
                     help='阶段1 局数 K1（默认 3）')
     ap.add_argument('--stage2-eps', type=int, default=None,
@@ -1968,10 +2135,10 @@ def main():
         cfg.FIT_MODE = args.fit_mode
         if not args.smoke:
             arm = 'econ' if args.fit_mode == 'econ' else 'tup'
-            cfg.CHECKPOINT_PATH = f'test7h_{arm}_checkpoint.pth'
-            cfg.BEST_MODEL_PATH = f'test7h_{arm}_best_model.pth'
-            cfg.LATEST_GEN_BEST_MODEL_PATH = f'test7h_{arm}_latest_gen_best.pth'
-            cfg.HISTORY_JSON_PATH = f'test7h_{arm}_history.json'
+            cfg.CHECKPOINT_PATH = f'test12_{arm}_checkpoint.pth'
+            cfg.BEST_MODEL_PATH = f'test12_{arm}_best_model.pth'
+            cfg.LATEST_GEN_BEST_MODEL_PATH = f'test12_{arm}_latest_gen_best.pth'
+            cfg.HISTORY_JSON_PATH = f'test12_{arm}_history.json'
     if args.eff_weight is not None:
         cfg.FOOD_EFF_WEIGHT = args.eff_weight
     if args.turn_eff_w is not None:
@@ -1986,11 +2153,15 @@ def main():
         cfg.TE_ELITE = args.te_elite
     if args.imitation_w is not None:
         cfg.IMITATION_W = args.imitation_w
+    if args.island_threshold is not None:
+        cfg.ISLAND_THRESHOLD = args.island_threshold
+    if args.island_penalty is not None:
+        cfg.ISLAND_PENALTY = args.island_penalty
     if args.name:
-        cfg.CHECKPOINT_PATH = f'test7h_{args.name}_checkpoint.pth'
-        cfg.BEST_MODEL_PATH = f'test7h_{args.name}_best_model.pth'
-        cfg.LATEST_GEN_BEST_MODEL_PATH = f'test7h_{args.name}_latest_gen_best.pth'
-        cfg.HISTORY_JSON_PATH = f'test7h_{args.name}_history.json'
+        cfg.CHECKPOINT_PATH = f'test12_{args.name}_checkpoint.pth'
+        cfg.BEST_MODEL_PATH = f'test12_{args.name}_best_model.pth'
+        cfg.LATEST_GEN_BEST_MODEL_PATH = f'test12_{args.name}_latest_gen_best.pth'
+        cfg.HISTORY_JSON_PATH = f'test12_{args.name}_history.json'
     if args.resume_pop:
         payload = torch.load(args.resume_pop, map_location='cpu', weights_only=False)
         saved = payload.get('config', {})
@@ -1998,6 +2169,10 @@ def main():
                       saved.get('OBS_DIM') != cfg.OBS_DIM or
                       saved.get('ACTION_DIM') != cfg.ACTION_DIM):
             sys.exit(f'[错误] resume-pop {args.resume_pop} 与当前维度不匹配')
+        if saved and saved.get('OBS_ENC_VERSION', '32proj') != getattr(cfg, 'OBS_ENC_VERSION', '32proj'):
+            sys.exit(f'[错误] resume-pop {args.resume_pop} 观测编码不符 '
+                     f'({saved.get("OBS_ENC_VERSION")} != {cfg.OBS_ENC_VERSION})，'
+                     f'7h 断点不能导入 test12（编码不同），请从零训练或用 --seed-model')
         parent = os.path.dirname(os.path.abspath(cfg.CHECKPOINT_PATH))
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -2040,7 +2215,13 @@ def main():
         play_best(cfg)
         return
 
-    run_training(cfg)
+    try:
+        run_training(cfg)
+    except Exception as e:
+        # 云端租卡场景：异常中断即推送告警，避免实例空转计费（AutoDL 官方建议场景）
+        send_autodl_notify(cfg, 'test12 训练异常退出',
+                           f'{type(e).__name__}: {str(e)[:150]}')
+        raise
 
 
 if __name__ == '__main__':

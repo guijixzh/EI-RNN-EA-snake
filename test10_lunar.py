@@ -40,6 +40,15 @@
 # 适应度口径 = env reward + 软着陆加分 - 悬停惩罚；成功率仍按原始 env reward>=200 统计。
 # 目标：原始 env 平均 reward >= 200。
 #
+# ---- 第 3 轮改造（test7h 特性移植 + Stage2 逐半精评）----
+#   1. 类正态变异强度（test7h #4）：每子代抽 s ~ LogNormal(0, 0.4) clip [0.25,4]，
+#      缩放其全部变异算子（掩码/拓扑触发率 ≤0.5、权重比例 ≤1.0、各 std 线性×s）；
+#      精英不变异。动机：固定小变异在收敛种群上只能随机游走（test7g 40 分平台教训）。
+#   2. 断点保留 + 逐代 history JSON（test7h #6）：完成后写入 next_gen=GENERATIONS
+#      终态断点（续训需提高 --gens），history.json 每代落盘。
+#   3. Stage2 逐半精评（successive halving）：128×4 -> 48×8 -> 16×16 阶梯，
+#      CRN 配对新种子逐轮加局，省 60% 精评开销且头部精度不降。
+#
 # 运行（需 gymnasium + box2d-py + torch，推荐 conda env_torch）:
 #   python test10_lunar.py --smoke      # 管线自检
 #   python test10_lunar.py              # 全量训练
@@ -47,6 +56,7 @@
 # ==========================================
 
 import argparse
+import json
 import math  # noqa: F401  （保持与 test7b 工具函数签名兼容）
 import os
 import random
@@ -74,6 +84,12 @@ class Config:
     WEIGHT_MUT_FRAC = 0.2
     WEIGHT_MUT_STD = 0.1
     TAU_E_MUT_STD = 0.05
+    # --- 类正态变异强度（每子代因子 s，缩放其全部变异算子；移植自 test7h）---
+    # 中位数 1=原强度；σ=0.4 时 P(s>2)≈2.4%（每代 ~43 个大变异），大步长跳出收敛平台
+    MUT_SCALE_DIST = 'lognormal'   # 'lognormal' | 'normal'
+    MUT_SCALE_SIGMA = 0.4          # lognormal: σ_ln；normal: s~N(1,σ) clip
+    MUT_SCALE_MIN = 0.25
+    MUT_SCALE_MAX = 4.0
     CYCLE_PATTERN = [('G2', 'G1', 'G3')]
 
     # --- 无激素 EI-RNN（文件格式兼容字段）---
@@ -90,11 +106,14 @@ class Config:
 
     # --- F1 公共随机数：每代每局一个种子，全体个体与所有评估分块共用 ---
     USE_CRN = True
+    CRN_SEED = 20250829          # 锚点：同代两跑逐位一致（可复现），换代自动换卷
 
-    # --- F2 两阶段评估：粗评全体 -> 精评头部候选（E3: k=2 排序≈随机，k=16 可用）---
+    # --- F2 两阶段评估：粗评全体 -> 逐半精评头部候选（successive halving）---
+    # 阶梯 [(保留候选数, 累计局数)]：128×4 -> 48×8 -> 16×16。
+    # 末轮 keep=16 配 ELITE_SIZE=64（16 名 16 局 + 48 名 8 局恰好覆盖精英池）；
+    # 总开销 832 局 vs 扁平 128×16=2048 局，省 60%，头部精度不降（E3: k=16 可用）
     STAGE2_ENABLED = True
-    STAGE2_CANDIDATES = 128
-    STAGE2_EPISODES = 16
+    STAGE2_LADDER = [(128, 4), (48, 8), (16, 16)]
 
     # --- F3 适应度整形 ---
     # 悬停惩罚：500 步/gym 截断未终局 → reward - HOVER_PENALTY（与坠毁 -100 同量级）
@@ -169,6 +188,7 @@ class Config:
     CHECKPOINT_PATH = 'test10_lunar_checkpoint.pth'
     BEST_MODEL_PATH = 'test10_lunar_best_model.pth'
     LATEST_GEN_BEST_MODEL_PATH = 'test10_lunar_latest_gen_best.pth'
+    HISTORY_JSON_PATH = 'test10_lunar_history.json'
     AUTO_RESUME = True
     CHECKPOINT_INTERVAL = 5
 
@@ -574,15 +594,16 @@ def _eval_chunk(pop, cfg, seeds=None, n_eps=None):
     return metrics
 
 
-def _draw_crn_seeds(cfg, n):
-    """CRN：一局一个种子。在 evaluate 层抽取一次，保证所有分块/两阶段可比。"""
-    return [random.randrange(2 ** 31) for _ in range(n)]
+def _draw_crn_seeds(cfg, n, gen, salt=0):
+    """CRN：一局一个种子，按 (CRN_SEED, gen, salt) 锚定（不消耗全局 RNG）。"""
+    rng = random.Random((int(getattr(cfg, 'CRN_SEED', 0)) * 1000003 + int(gen)) * 2 + int(salt))
+    return [rng.randrange(2 ** 31) for _ in range(n)]
 
 
-def evaluate_population_gpu(pop, cfg):
+def evaluate_population_gpu(pop, cfg, gen=0):
     if getattr(cfg, 'USE_FP16', True):
         pop.fp16()
-    seeds = _draw_crn_seeds(cfg, cfg.EVAL_EPISODES) if cfg.USE_CRN else None
+    seeds = _draw_crn_seeds(cfg, cfg.EVAL_EPISODES, gen) if cfg.USE_CRN else None
     batch = _auto_eval_batch(cfg, pop.device)
     if batch >= pop.P:
         pop.refresh_eff()
@@ -596,16 +617,33 @@ def evaluate_population_gpu(pop, cfg):
             mn[lo:lo + sub.P] = _eval_chunk(sub, cfg, seeds)
         metrics = torch.from_numpy(mn)
 
-    # ---- F2 第二阶段：头部候选用更多局的新种子精评，覆盖回写 metrics ----
-    if getattr(cfg, 'STAGE2_ENABLED', False) and cfg.STAGE2_EPISODES > cfg.EVAL_EPISODES:
+    # ---- F2 第二阶段逐半精评：[(keep, cum_eps)] 阶梯，每轮 CRN 新种子加局 ----
+    # 未晋级候选保留其已达精度的累计估计；晋级者估计 = (旧均值×prev + 新均值×n_new)/cum
+    ladder = getattr(cfg, 'STAGE2_LADDER', None)
+    if getattr(cfg, 'STAGE2_ENABLED', False) and ladder and ladder[0][1] > cfg.EVAL_EPISODES:
         mn = metrics.numpy()
         fits = np.array([_fitness(mn[i][0], mn[i][1], mn[i][3:7], cfg)
                          for i in range(pop.P)])
-        cand = np.argsort(-fits)[:min(cfg.STAGE2_CANDIDATES, pop.P)]
-        sub = pop[cand.tolist()]
-        sub.refresh_eff()
-        s2_seeds = _draw_crn_seeds(cfg, cfg.STAGE2_EPISODES) if cfg.USE_CRN else None
-        mn[cand] = _eval_chunk(sub, cfg, s2_seeds, n_eps=cfg.STAGE2_EPISODES)
+        cand = np.argsort(-fits)[:min(ladder[0][0], pop.P)]
+        prev_eps = 0
+        for r, (keep, cum_eps) in enumerate(ladder):
+            n_new = cum_eps - prev_eps
+            if n_new <= 0 or len(cand) == 0:
+                break
+            sub = pop[cand.tolist()]
+            sub.refresh_eff()
+            seeds = _draw_crn_seeds(cfg, n_new, gen, salt=1 + r) if cfg.USE_CRN else None
+            fresh = _eval_chunk(sub, cfg, seeds, n_eps=n_new)
+            if prev_eps == 0:
+                mn[cand] = fresh
+            else:
+                mn[cand] = (mn[cand] * prev_eps + fresh * n_new) / cum_eps
+            prev_eps = cum_eps
+            if r + 1 < len(ladder):
+                nxt_keep = min(ladder[r + 1][0], len(cand))
+                rows_fits = np.array([_fitness(mn[i][0], mn[i][1], mn[i][3:7], cfg)
+                                      for i in cand])
+                cand = cand[np.argsort(-rows_fits)[:nxt_keep]]
         metrics = torch.from_numpy(mn)
     return metrics
 
@@ -613,21 +651,29 @@ def evaluate_population_gpu(pop, cfg):
 # ==========================================
 # 5. 进化（GPU 向量化交叉/变异，与 test7b 一致）
 # ==========================================
+def sample_mut_scale(cfg, B2, dev):
+    """每子代变异强度因子 s：lognormal（右偏，大变异小概率）或 normal clip。"""
+    sigma = float(getattr(cfg, 'MUT_SCALE_SIGMA', 0.4))
+    if getattr(cfg, 'MUT_SCALE_DIST', 'lognormal') == 'normal':
+        s = 1.0 + torch.randn(B2, device=dev) * sigma
+    else:
+        s = torch.exp(torch.randn(B2, device=dev) * sigma)   # LogNormal(0, σ)
+    return s.clamp(float(getattr(cfg, 'MUT_SCALE_MIN', 0.25)),
+                   float(getattr(cfg, 'MUT_SCALE_MAX', 4.0)))
+
+
 def evolve_topology_gpu(pop, metrics, cfg, gen=0):
+    """进化下一代：ELITE 精英 + (P-ELITE) 后代。
+
+    变异强度：每子代抽因子 s（类正态分布）缩放其全部变异算子（test7h #4）；
+    精英不变异。
+    """
     P = pop.P
     N = pop.N
     dev = pop.device
     active = _freeze_active_groups(gen, cfg)
     has_g1 = 'G1' in active
     has_g2 = 'G2' in active
-
-    topo_mut_prob = cfg.TOPOLOGY_MUT_PROB
-    mask_mut_rate = cfg.MUT_RATE
-    weight_mut_frac = cfg.WEIGHT_MUT_FRAC
-    weight_mut_std = cfg.WEIGHT_MUT_STD
-    tau_mut_std = cfg.TAU_E_MUT_STD
-    w_ei_std = cfg.W_EI_MUT_STD
-    w_ie_std = cfg.W_IE_MUT_STD
 
     # --- 精英排序（按适应度）---
     mn = metrics.cpu().numpy()
@@ -650,6 +696,16 @@ def evolve_topology_gpu(pop, metrics, cfg, gen=0):
 
     p1 = elites[p1_idx]
     p2 = elites[p2_idx]
+
+    # --- 每子代变异强度因子（lognormal 中位数 1 = 原强度；右偏大变异）---
+    s = sample_mut_scale(cfg, B2, dev)
+    topo_mut_prob_i = (cfg.TOPOLOGY_MUT_PROB * s).clamp(max=0.5)          # [B2]
+    mask_mut_rate_i = (cfg.MUT_RATE * s).clamp(max=0.5)                   # [B2]
+    weight_frac1 = (cfg.WEIGHT_MUT_FRAC * s).clamp(max=1.0)               # [B2]
+    weight_std1 = (cfg.WEIGHT_MUT_STD * s)                                # [B2]
+    tau_std2 = (cfg.TAU_E_MUT_STD * s).view(B2, 1)
+    wei_std2 = (cfg.W_EI_MUT_STD * s).view(B2, 1)
+    wie_std2 = (cfg.W_IE_MUT_STD * s).view(B2, 1)
 
     with torch.no_grad():
         # ---- G1 交叉：结构组 ----
@@ -681,29 +737,35 @@ def evolve_topology_gpu(pop, metrics, cfg, gen=0):
             children.w_ei = torch.where(col2, p1.w_ei, p2.w_ei)
             children.w_ie = torch.where(col2, p1.w_ie, p2.w_ie)
 
-        # ---- 变异 ----
+        # ---- 变异（逐组独立，冻结组跳过；强度逐子代 s 缩放，test7h #4）----
         if has_g1:
             pick = torch.randint(0, 3, (B2,), device=dev)
-            topo_gate = torch.rand(B2, device=dev) < topo_mut_prob
+            topo_gate = torch.rand(B2, device=dev) < topo_mut_prob_i
             for ai, attr in enumerate(GeneStack.G1_MASKS):
                 sel = (pick == ai) & topo_gate
                 if bool(sel.any().item()):
                     t = getattr(children, attr)
-                    flip = torch.rand_like(t) < mask_mut_rate
+                    rate3 = mask_mut_rate_i.view(B2, 1, 1)
+                    flip = torch.rand_like(t) < rate3
                     setattr(children, attr,
                             torch.where(sel[:, None, None] & flip, 1.0 - t, t))
             for attr in GeneStack.G1_WEIGHTS:
                 t = getattr(children, attr)
-                noise = torch.randn_like(t) * weight_mut_std
-                m = (torch.rand_like(t) < weight_mut_frac).to(t.dtype)
+                # 按基因张量维度自适应广播 [B2,1,1]/[B2,1]
+                v = lambda x: x.view(B2, *([1] * (t.dim() - 1))).to(t.dtype)
+                noise = torch.randn_like(t) * v(weight_std1)
+                m = (torch.rand_like(t) < v(weight_frac1)).to(t.dtype)
                 setattr(children, attr, t + noise * m)
 
         if has_g2:
-            children.tau_e = torch.clamp(children.tau_e + torch.randn_like(children.tau_e) * tau_mut_std,
+            children.tau_e = torch.clamp(children.tau_e + torch.randn_like(children.tau_e)
+                                         * tau_std2.to(children.tau_e.dtype),
                                          cfg.TAU_E_MIN, cfg.TAU_E_MAX)
-            children.w_ei = torch.clamp(children.w_ei + torch.randn_like(children.w_ei) * w_ei_std,
+            children.w_ei = torch.clamp(children.w_ei + torch.randn_like(children.w_ei)
+                                        * wei_std2.to(children.w_ei.dtype),
                                         cfg.W_EI_MIN, cfg.W_EI_MAX)
-            children.w_ie = torch.clamp(children.w_ie + torch.randn_like(children.w_ie) * w_ie_std,
+            children.w_ie = torch.clamp(children.w_ie + torch.randn_like(children.w_ie)
+                                        * wie_std2.to(children.w_ie.dtype),
                                         cfg.W_IE_MIN, cfg.W_IE_MAX)
 
     for g in GeneStack.GENES:
@@ -796,6 +858,14 @@ def load_checkpoint10(path, cfg):
     return data
 
 
+def save_history_json(path, history):
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(history, f, ensure_ascii=False)
+
+
 # ==========================================
 # 7. 主循环
 # ==========================================
@@ -856,7 +926,7 @@ def run_training(cfg):
     try:
         for gen in range(start_gen, cfg.GENERATIONS):
             t_eval = time.perf_counter()
-            metrics = evaluate_population_gpu(pop, cfg)
+            metrics = evaluate_population_gpu(pop, cfg, gen=gen)
             eval_time = time.perf_counter() - t_eval
             cum_eval_time += eval_time
 
@@ -875,6 +945,7 @@ def run_training(cfg):
             history['avg_reward'].append(avg_reward)
             history['best_success'].append(b_success)
             history['avg_success'].append(avg_success)
+            save_history_json(cfg.HISTORY_JSON_PATH, history)   # 逐代落盘（test7h #6）
 
             if b_reward > best_reward:
                 best_reward = b_reward
@@ -914,6 +985,7 @@ def run_training(cfg):
         save_checkpoint10(cfg.CHECKPOINT_PATH, cfg, nxt, pop, history,
                           cum_eval_time, cum_evolve_time,
                           best_state, best_reward, best_success)
+        save_history_json(cfg.HISTORY_JSON_PATH, history)
         print(f"断点已保存: {cfg.CHECKPOINT_PATH} (下次从第 {nxt} 代接续)")
         sys.exit(0)
 
@@ -933,9 +1005,13 @@ def run_training(cfg):
         print(f"最新一代最优模型已保存: {cfg.LATEST_GEN_BEST_MODEL_PATH} "
               f"(Reward={latest_gen_best_reward:.1f})")
 
-    if os.path.exists(cfg.CHECKPOINT_PATH):
-        os.remove(cfg.CHECKPOINT_PATH)
-        print(f"训练已完成，已删除临时断点: {cfg.CHECKPOINT_PATH}")
+    # 断点保留（test7h #6：完成后删除断点导致跨 run 只能种子注入=准重启）
+    save_checkpoint10(cfg.CHECKPOINT_PATH, cfg, cfg.GENERATIONS, pop, history,
+                      cum_eval_time, cum_evolve_time,
+                      best_state, best_reward, best_success)
+    save_history_json(cfg.HISTORY_JSON_PATH, history)
+    print(f"训练完成，断点已保留: {cfg.CHECKPOINT_PATH} "
+          f"(next_gen={cfg.GENERATIONS}，续训需提高 --gens)")
 
     try:
         import matplotlib
@@ -1028,12 +1104,12 @@ def make_smoke_config():
     cfg.EVAL_EPISODES = 1
     cfg.MAX_STEPS = 120
     cfg.FRAME_RATE = 2
-    cfg.STAGE2_CANDIDATES = 8     # 覆盖两阶段精评路径
-    cfg.STAGE2_EPISODES = 2
+    cfg.STAGE2_LADDER = [(8, 2), (4, 3)]   # 覆盖逐半精评多轮路径
     cfg.CHECKPOINT_INTERVAL = 1
     cfg.CHECKPOINT_PATH = 'test10_lunar_smoke_checkpoint.pth'
     cfg.BEST_MODEL_PATH = 'test10_lunar_smoke_best.pth'
     cfg.LATEST_GEN_BEST_MODEL_PATH = 'test10_lunar_smoke_latest_best.pth'
+    cfg.HISTORY_JSON_PATH = 'test10_lunar_smoke_history.json'
     cfg.AUTO_RESUME = False
     cfg.EVAL_BATCH = 16
     cfg.PRINT_HISTORY_EVERY = 1
@@ -1053,8 +1129,14 @@ def main():
     ap.add_argument('--device', type=str, default=None)
     ap.add_argument('--no-crn', action='store_true', help='关闭公共随机数（A/B 对照）')
     ap.add_argument('--no-stage2', action='store_true', help='关闭两阶段精评（A/B 对照）')
-    ap.add_argument('--stage2-candidates', type=int, default=None)
-    ap.add_argument('--stage2-episodes', type=int, default=None)
+    ap.add_argument('--stage2-candidates', type=int, default=None,
+                    help='逐半精评首轮候选数（默认 128；后续轮按 48/128、16/128 比例缩放）')
+    ap.add_argument('--stage2-episodes', type=int, default=None,
+                    help='逐半精评末轮累计局数（默认 16；阶梯局数取 E/4、E/2、E）')
+    ap.add_argument('--mut-sigma', type=float, default=None,
+                    help='类正态变异强度 σ（默认 0.4，中位数 1=原强度）')
+    ap.add_argument('--mut-dist', type=str, default=None, choices=['lognormal', 'normal'],
+                    help='变异强度分布（默认 lognormal）')
     ap.add_argument('--hover-penalty', type=float, default=None,
                     help='500 步截断悬停惩罚（默认 100；0=关闭）')
     ap.add_argument('--no-soft-bonus', action='store_true',
@@ -1083,10 +1165,16 @@ def main():
         cfg.USE_CRN = False
     if args.no_stage2:
         cfg.STAGE2_ENABLED = False
-    if args.stage2_candidates:
-        cfg.STAGE2_CANDIDATES = args.stage2_candidates
-    if args.stage2_episodes:
-        cfg.STAGE2_EPISODES = args.stage2_episodes
+    if args.stage2_candidates or args.stage2_episodes:
+        c0 = args.stage2_candidates or cfg.STAGE2_LADDER[0][0]
+        e0 = args.stage2_episodes or cfg.STAGE2_LADDER[-1][1]
+        cfg.STAGE2_LADDER = [(max(1, c0), max(cfg.EVAL_EPISODES + 1, e0 // 4)),
+                              (max(1, c0 * 48 // 128), max(cfg.EVAL_EPISODES + 1, e0 // 2)),
+                              (max(1, c0 * 16 // 128), e0)]
+    if args.mut_sigma is not None:
+        cfg.MUT_SCALE_SIGMA = args.mut_sigma
+    if args.mut_dist:
+        cfg.MUT_SCALE_DIST = args.mut_dist
     if args.hover_penalty is not None:
         cfg.HOVER_PENALTY = args.hover_penalty
     if args.no_soft_bonus:
