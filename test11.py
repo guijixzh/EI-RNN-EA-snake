@@ -1,0 +1,2101 @@
+# ==========================================
+# test11.py —— 锦标赛淘汰制筛选实验（★独立系列，不沿用 test7 编号★）
+#
+# 系列定位：选择机制属根本方法改进（逐轮加赛两两淘汰 vs 全局排序截断），
+# 独立为 test11 系列；test7g（单阶段全评 10 局、无 CRN 的旧基准）与
+# test7h（现行 CRN 两阶段快速筛选）仅作外部参照线，不在本系列内续训。
+# 代码基座 = test7h v2（适应度 W3/CAP4、CRN、弱连接屏蔽、类正态变异全部
+# 保留不动），唯一实验变量是筛选器（evaluate_population_gpu 分派）。
+#
+# 实验设计（docs/test11_experiment_log.md，预注册）：
+#  - A 臂 two_stage：现行快速二阶段 K1=3 保 410 → K2=10，精英判据累计 13 局，
+#    每代 2048×3 + 410×10 = 10244 局次；
+#  - B 臂 tournament：每轮 K=TOURN_K(默认3) 局新 CRN 库、指标加权累计后
+#    随机配对两两对比（累计分高者晋级，奇数末位轮空），每轮砍半
+#    2048→1024→512→256，精英判据累计 9 局，
+#    每代 3×(2048+1024+512) = 10752 局次（仅 +5%）；
+#  - 双臂从零同起点（--seed 固定初始化 + 同 CRN_SEED），20 代单 seed 对比；
+#  - --tourn-pairing rank = 按累计分排序砍半（消融变体，Phase 0 离线对比用）；
+#  - --tourn-final-pass = 精英终轮加赛 K 局（提升精英判据局数，调参用）。
+#
+# ---- 以下为代码基座 test7h 的原始头注释 ----
+#
+# test7h —— CRN 精确筛选 + 两阶段淘汰 + 类正态变异版（基于 test7g，诊断驱动）
+#
+# v2（解法器基准校准，experiments/solver_reference.py）：
+#  - 适应度转弯效率升为一等力量：W 0.5→3.0、CAP 8→4（ratio 口径 SL/TL）。
+#    依据：同库同食数配对下，有序解法器比 7h/7b 模型高 +1.6 分（> 单食边际
+#    1.25 → 渐进转型可攀爬）；旧参数仅 +0.15 分形同虚设。CAP=4 ⇔ 密度 0.25
+#    饱和 → 长直段折叠拿满 3 分不被压制（7d 乘法计价压折叠的教训不复发）。
+#  - 评估期弱连接屏蔽 W_rec×20%（训练=部署同口径，实测 +1.8 分）。
+#  - FITNESS_VERSION：断点跨版本续训自动重置 best 追踪。
+#  - 重要实验事实：纯哈密顿回路跟随 40/40 全部饿死（均 0.4 食）——饿死钟
+#    （3·len+20）在蛇长<27 时短于回路平均遇食距离 ~50 步，环境规则本身
+#    禁止纯有序策略，早期强制抄近路；有序参考 = 回路+安全捷径（密度 0.30，
+#    te 3.2，每食物 9 步）。
+#
+# test7g 40 平台诊断结论（experiments/diagnose_test7g_plateau.py，40 局实测）：
+#  - 适应度排序无过错：τ(现适应度, food)=0.99、反转 0 例；7b 脑在本适应度下
+#    可得 ~60 分而种群困在 ~40 → 瓶颈在选择噪声与血统，不在公式；
+#  - 选择噪声淹没信号：个体内 10 局 SEM=2.18 vs 精英间 σ=3.34，上代第 1 名
+#    重评 28.7 / 第 5 名 39.6——排序大半凭食物运气；2048×10 局极值统计虚增
+#    best ≈+7 分（"40.9 平台"真实水平 ≈33）；
+#  - avg 自 gen23 冻结 25 代：固定小变异在收敛种群上只能随机游走。
+#
+# 相对 test7g 的改动：
+#  1. 适应度重写（econ）：fitness = food + 0.3·food/steps_last
+#       + TURN_EFF_W·min(steps_last/max(turns_last,1), CAP)/CAP
+#     - reach 项删除（它塑形出"守干净空间饿死"：55% 局饿死于口袋食物旁，
+#       序号>31 段 26-33% 食物对头部不可达仍不吃）；avg_reach 仅保留观测。
+#     - 转弯效率 = 最后一食为止步数/同窗口转弯数（整局口径下末食后直行
+#       游荡会白拿无穷高效率）；CAP=8 饱和，项幅 ≤0.5 分（tie-breaker：
+#       实测 7b 穿行密度 0.88 与平台脑游荡 0.80 几乎相同，转弯项不可能区分
+#       二者，任何 ≥12 分的权重都会把 23 分直线脑排到 50 分 7b 之上）。
+#  2. CRN 公共随机数（种子序列固定）：每代每局预生成食物流 bank（初始朝向/
+#     初始食物/逐次落子候选），全种群全分块共用；代间/阶段间换新种子。
+#     政策为确定性 argmax、环境给定 bank 后完全确定 → 同代个体分数无任何
+#     食物运气差异，排序翻转与 best 极值虚增同时消失。
+#  3. 两阶段淘汰：阶段1 全种群 ×STAGE1_EPS 局（CRN 同库精确可比）→ 保前
+#     STAGE2_KEEP 名；阶段2 幸存者 ×STAGE2_EPS 局新库，按累计 (K1+K2) 局
+#     定精英。默认 2048×3 + 410×10 = -50% 评估量，精英判据 10→13 局。
+#  4. 类正态变异强度：每子代抽 s ~ LogNormal(0, MUT_SIGMA) clip [0.25,4]
+#     （中位数 1=现行强度；P(s>2)≈2.4% → 每代 ~43 个大变异），缩放该子代
+#     全部变异算子（掩码翻转率≤0.5 / 拓扑触发率≤0.5 / 权重扰动比例≤1.0
+#     及各 std）；精英不变异。
+#  5. 疲劳彻底关闭（FATIGUE_TURN_GAIN=0.0，留开关）；单侧转弯判死保持关闭。
+#  6. 训练完成不再删除断点（7g 教训：跨 run 只能种子注入=准重启）；
+#     逐代 history 落盘 JSON。
+# 观测：曼哈顿度量固定（欧氏对角偏置 √2 已验证为错误启发，不再提供回退）。
+# ==========================================
+
+import argparse
+import json
+import math
+import os
+import random
+import sys
+import time
+
+import numpy as np
+import torch
+
+
+# ==========================================
+# 0. 全局配置类
+# ==========================================
+class Config:
+    # --- 进化参数（与 test5d/7 系一致）---
+    POP_SIZE = 2048
+    GENERATIONS = 100
+    ELITE_SIZE = 256
+    MUT_RATE = 0.05
+    TOPOLOGY_MUT_PROB = 0.05
+    WEIGHT_MUT_FRAC = 0.2
+    WEIGHT_MUT_STD = 0.1
+    TAU_E_MUT_STD = 0.05
+    EVO_COS_MODE = 'anneal'
+    EVO_COS_PERIOD = 100
+    EVO_DYN_DECAY_TAU = 33
+
+    # --- 类正态变异强度（每子代因子 s，缩放其全部变异算子）---
+    MUT_SCALE_DIST = 'lognormal'   # 'lognormal' | 'normal'
+    MUT_SCALE_SIGMA = 0.4          # lognormal: σ_ln；normal: s~N(1,σ) clip
+    MUT_SCALE_MIN = 0.25
+    MUT_SCALE_MAX = 4.0
+
+    # --- 无激素 EI-RNN（兼容字段）---
+    TRAIN_HORMONE_NET = False
+    HORMONE_NET_HIDDEN = 32
+
+    # --- 环境参数 ---
+    GRID_SIZE = 10
+    EVAL_EPISODES = 10          # 阶段2 局数 K2（累计 K1+K2 定精英）
+    MAX_STEPS = 100000
+
+    # --- 脑结构参数 ---
+    NUM_COLUMNS = 256
+    OBS_MODE = '32proj'
+    OBS_DIM = 24 if OBS_MODE == '24' else 32
+    ACTION_DIM = 3
+    INIT_DENSITY = 0.15
+
+    # --- 适应度模式：'econ'=三项和式（本版主模式）| 'tuple'=元组字典序 ---
+    FIT_MODE = 'econ'
+
+    # --- 适应度版本（公式变更时 +1；断点版本不一致则重置 best 追踪）---
+    FITNESS_VERSION = 2
+
+    # --- econ：fitness = food + W_e·eff + W_t·min(SL/TL, CAP)/CAP ---
+    FOOD_EFF_WEIGHT = 0.3   # 吃子效率权重（7b 验证量级，防固定回路退化）
+    # 转弯效率（解法器基准实测校准，results/test7h_solver_reference.json）：
+    #   有序解法器 te=SL/TL≈3.2 / 密度 0.30；模型 te≈1.13 / 密度 0.88。
+    #   W=3, CAP=4 → 同食数下解法器比模型高 ~1.6 分 > 单食边际 1.25 分
+    #   → 渐进转型的变异体（少 1 食但路径有序）仍胜出，选择可攀爬；
+    #   旧参数 W=0.5/CAP=8 仅 +0.15 分（形同虚设）。
+    #   CAP=4 ⇔ 密度 0.25（长直段折返）即饱和 → 折叠不受压制；
+    #   后期"多转弯换一食"的损失 ≤0.3 分，不可能阻断吃食。
+    TURN_EFF_W = 3.0        # 转弯效率权重（项幅 ≤3 分）
+    TURN_EFF_CAP = 4.0      # 转弯效率饱和上限（SL/TL ≥ 4 后不再加分）
+    TURN_EFF_MODE = 'ratio'  # 'ratio'=SL/TL | 'tpf'=每食物转弯数（备选口径）
+
+    # --- 评估期弱连接屏蔽（H2，训练=部署同口径；基因不动）---
+    # 实测屏蔽 W_rec 最弱 20% 在同库配对下 +1.8 分（10% 反而 −1.4，
+    # 30% +1.1，40% −0.8）：弱内连接是 ~2 分的内噪损耗。进化评估即用
+    # 屏蔽后的成绩 → 训练产物=部署形态。
+    WEAK_MASK_FRAC = 0.20
+
+    # --- 单侧转弯判死（保持关闭：早期随机个体普遍摇头，判罚干扰初期筛选）---
+    ONE_SIDED_TURN_DEATH = False
+
+    # --- 饿死斜率：steps_wo_food > STARVE_SLOPE*len + 20 ---
+    STARVE_SLOPE = 3.0
+
+    # --- 观测：曼哈顿度量固定（欧氏对角偏置已验证为错误启发）---
+    OBS_MANHATTAN = True
+    OBS_FOOD_SCALE = 8.0
+    OBS_SELF_SCALE = 8.0
+    OBS_OBSTACLE_SCALE = 8.0
+
+    # --- E-I 动力学参数 ---
+    BASE_TAU_E = 0.7
+    TAU_E_NOISE = 0.1
+    TAU_E_MIN = 0.001
+    TAU_E_MAX = 2.0
+    W_EI = 2.0
+    W_IE = 2.0
+    W_EI_MUT_STD = 0.1
+    W_IE_MUT_STD = 0.1
+    W_EI_MIN = 0.0
+    W_EI_MAX = 6.0
+    W_IE_MIN = 0.0
+    W_IE_MAX = 6.0
+
+    # --- 短期 tau 调制 ---
+    SHORT_TERM_GAIN = -0.2
+    SHORT_TERM_DECAY = 0.3
+
+    # --- 转向疲劳（彻底关闭：0.0；留开关便于回溯）---
+    FATIGUE_TURN_GAIN = 0.0
+    FATIGUE_TURN_DECAY = 0.9
+
+    # --- K 倍帧率思考 ---
+    FRAME_RATE = 5
+    INPUT_DECAY = 0.9
+
+    # --- 进化筛选策略 ---
+    LONG_SNAKE_SCORE_THRESHOLD = 3.0
+    CYCLE_PATTERN = [('G2', 'G1', 'G3')]
+
+    # --- CRN 公共随机数（筛选种子序列固定）---
+    USE_CRN = True
+    CRN_SEED = 20260827
+    CRN_DRAW = 4096             # 每局预生成落子候选流长度
+
+    # --- 两阶段淘汰（A 臂 = 现行快速二阶段筛选）---
+    STAGE1_EPS = 3              # 阶段1 局数 K1（全种群，CRN 同库）
+    STAGE2_KEEP = 410           # 阶段1 后幸存数（须 ≥ ELITE_SIZE）
+    STAGE2_EPS = 10             # 阶段2 局数 K2（新库；累计 K1+K2 定精英）
+
+    # --- 锦标赛淘汰制（B 臂 = 本系列实验变量，SELECTION_MODE 分派）---
+    SELECTION_MODE = 'two_stage'   # 'two_stage'（现行）| 'tournament'（锦标赛）
+    TOURN_K = 3                 # 每轮局数 K（轮内新 CRN 库，累计加权均值）
+    TOURN_PAIRING = 'random'    # 'random'=随机配对淘汰赛 | 'rank'=按累计分排序砍半
+    TOURN_FINAL_PASS = False    # True=精英定名次后再加赛 K 局（提升判据局数）
+    INIT_SEED = 42              # 初始化/进化全局种子（0=不固定，A/B 同起点关键）
+
+    # --- GPU 并行参数 ---
+    DEVICE = 'auto'
+    USE_FP16 = True
+    EVAL_BATCH = 0
+    EVAL_MEM_FRAC = 0.55
+
+    # --- 输出 ---
+    PRINT_HISTORY_EVERY = 1
+
+    # --- 断点 / 最优模型 / 种子（main 按 --fit-mode/--tag 重写文件名）---
+    CHECKPOINT_PATH = 'test11_econ_checkpoint.pth'
+    BEST_MODEL_PATH = 'test11_econ_best_model.pth'
+    LATEST_GEN_BEST_MODEL_PATH = 'test11_econ_latest_gen_best.pth'
+    HISTORY_JSON_PATH = 'test11_econ_history.json'
+    AUTO_RESUME = True
+    CHECKPOINT_INTERVAL = 10
+    SEED_FROM_BEST = False
+    SEED_MODEL_PATH = ''
+    SEED_MODEL_PATH2 = ''
+
+
+# ==========================================
+# 0b. 基础工具
+# ==========================================
+def _resolve_device(cfg):
+    if cfg.DEVICE != 'auto':
+        return torch.device(cfg.DEVICE)
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    return torch.device('cpu')
+
+
+def _cfg_dict(cfg):
+    merged = {}
+    merged.update(vars(cfg.__class__))
+    merged.update(vars(cfg))
+    return {k: v for k, v in merged.items() if not k.startswith('__')}
+
+
+def _freeze_active_groups(gen, cfg):
+    pattern = getattr(cfg, 'CYCLE_PATTERN', [('G2', 'G1')])
+    active = set(pattern[gen % len(pattern)])
+    if not bool(getattr(cfg, 'TRAIN_HORMONE_NET', False)):
+        active.discard('G3')
+    return frozenset(active)
+
+
+def _fitness_econ(m, cfg):
+    """三项和式适应度（food 主导 + 微量吃子效率 + 转弯效率一等力量）：
+    fitness = food + EFF_W·(food/steps_last)
+              + TURN_EFF_W · min(steps_last/turns_last, CAP)/CAP     [ratio 模式]
+              + TURN_EFF_W · max(0, 1 − (turns_last/food)/CAP_TPF)   [tpf 备选]
+    - 转弯效率窗口截断到"最后一食为止"（SL/TL 同窗口，游荡不改变比值）；
+    - W=3/CAP=4 由解法器基准校准（见 Config 注释）：同食数下有序路径
+      比模型高 ~1.6 分 > 单食边际 1.25 → 渐进可攀爬；CAP=4 即密度 0.25
+      饱和 → 长直段折叠拿满，不被压制；
+    - turns_last=0 且 food>0 → 效率取 CAP（全程直行=完美）。
+    m 列：0 food, 1 seen, 2 unseen, 3 steps_last, 10 turns_last
+    """
+    if m[1] >= 99999:
+        return -1e9
+    food, steps_last, turns_last = m[0], m[3], m[10]
+    if food <= 0:
+        return 0.0
+    eff = food / max(steps_last, 1.0)
+    cap = float(getattr(cfg, 'TURN_EFF_CAP', 4.0))
+    w = float(getattr(cfg, 'TURN_EFF_W', 3.0))
+    if getattr(cfg, 'TURN_EFF_MODE', 'ratio') == 'tpf':
+        te_pts = max(0.0, 1.0 - (turns_last / food) / 10.0)
+    else:
+        te = cap if turns_last <= 0 else min(steps_last / max(turns_last, 1.0), cap)
+        te_pts = te / cap
+    return food + float(getattr(cfg, 'FOOD_EFF_WEIGHT', 0.3)) * eff + w * te_pts
+
+
+def _fitness_tuple(m, cfg):
+    """test7 原版元组字典序排序键。"""
+    if m[1] >= 99999:
+        return (-1e9, 0, 0)
+    threshold = float(getattr(cfg, 'LONG_SNAKE_SCORE_THRESHOLD', 3.0))
+    food, seen, unseen = m[0], m[1], m[2]
+    if food > threshold:
+        return (food, unseen, -seen)
+    return (food, -seen, unseen)
+
+
+def _make_key_fn(cfg):
+    """返回行向量排序键函数 key(m)，m 为 _eval_chunk 输出的单行指标。"""
+    mode = getattr(cfg, 'FIT_MODE', 'econ')
+    if mode == 'tuple':
+        return lambda m: _fitness_tuple(m, cfg)
+    return lambda m: _fitness_econ(m, cfg)
+
+
+def _auto_eval_batch(cfg, device):
+    """单次扫描允许的最大副本数（个体×局复制后的批维大小）。
+
+    注意：不限 POP_SIZE——局维折叠后批维=个体数×并行局数，按显存估算即可。
+    """
+    if cfg.EVAL_BATCH > 0:
+        return max(cfg.EVAL_BATCH, 32)
+    if device.type != 'cuda':
+        return 1 << 20
+    n = cfg.NUM_COLUMNS
+    try:
+        total = torch.cuda.get_device_properties(device).total_memory
+    except Exception:
+        return 1 << 20
+    per_ind = n * n * 16.0
+    per_ind += n * cfg.OBS_DIM * 6.0
+    batch = int(total * cfg.EVAL_MEM_FRAC / per_ind)
+    return max(32, batch)
+
+
+def _crn_seed(cfg, gen, stage, ep):
+    """每代/阶段/局独立且跨进程确定的种子（python hash 有进程盐，不可用）。"""
+    return (int(cfg.CRN_SEED) * 1000003 + int(gen) * 1009
+            + int(stage) * 101 + int(ep)) % (2 ** 63 - 1)
+
+
+def make_bank(cfg, gen, stage, ep, device):
+    """生成一局的公共落子流 + 公共初始朝向（全体个体共用）。"""
+    g = torch.Generator()
+    g.manual_seed(_crn_seed(cfg, gen, stage, ep))
+    stream = torch.randint(0, cfg.GRID_SIZE, (cfg.CRN_DRAW, 2), generator=g).to(device)
+    dir0 = int(torch.randint(0, 4, (1,), generator=g).item())
+    return {'stream': stream, 'dir0': dir0}
+
+
+def make_banks(cfg, gen, stage, episodes, device):
+    return [make_bank(cfg, gen, stage, e, device) for e in range(episodes)]
+
+
+# ==========================================
+# 1. 种群基因组张量栈
+# ==========================================
+class GeneStack:
+    """整个种群的基因型/表现型堆叠张量（与 test7g 完全一致）。
+
+    形状约定（B = 个体数, N = 柱数, O = 观测维, A = 动作维）：
+      M_in  [B,N,O]   M_rec [B,N,N]   M_out [B,A,N]
+      W_in  [B,N,O]   W_rec [B,N,N]   W_out [B,A,N]
+      b_out [B,A]     tau_e [B,N]     w_ei / w_ie [B,N]
+    """
+
+    GENES = ['M_in', 'M_rec', 'M_out',
+             'W_in', 'W_rec', 'W_out', 'b_out',
+             'tau_e', 'w_ei', 'w_ie']
+    G1_WEIGHTS = ['W_in', 'W_rec', 'W_out', 'b_out']
+    G1_MASKS = ['M_in', 'M_rec', 'M_out']
+    G2_TENSORS = ['tau_e', 'w_ei', 'w_ie']
+    EFF = ['W_in_eff', 'W_rec_eff', 'W_out_eff']
+
+    def __init__(self, cfg, B=None, device=None):
+        self.cfg = cfg
+        self.N = cfg.NUM_COLUMNS
+        self.O = cfg.OBS_DIM
+        self.A = cfg.ACTION_DIM
+        self.P = B if B is not None else cfg.POP_SIZE
+        self.device = device if device is not None else _resolve_device(cfg)
+        self.dtype = torch.float32
+        for g in self.GENES:
+            setattr(self, g, None)
+        for e in self.EFF:
+            setattr(self, e, None)
+
+    def random_init(self):
+        cfg = self.cfg
+        N, O, A, B = self.N, self.O, self.A, self.P
+        dev = self.device
+        with torch.no_grad():
+            self.M_in = (torch.rand(B, N, O, device=dev) < cfg.INIT_DENSITY).float()
+            self.M_rec = (torch.rand(B, N, N, device=dev) < cfg.INIT_DENSITY).float()
+            eye = torch.eye(N, dtype=torch.bool, device=dev)
+            self.M_rec[:, eye] = 0.0
+            self.M_out = (torch.rand(B, A, N, device=dev) < cfg.INIT_DENSITY).float()
+
+            self.W_in = torch.randn(B, N, O, device=dev) * 0.1
+            self.W_rec = torch.randn(B, N, N, device=dev) * 0.05
+            self.W_out = torch.randn(B, A, N, device=dev) * 0.1
+            self.b_out = torch.zeros(B, A, device=dev)
+
+            tau = (torch.rand(B, N, device=dev) * 2 - 1) * cfg.TAU_E_NOISE
+            self.tau_e = (cfg.BASE_TAU_E + tau).clamp(cfg.TAU_E_MIN, cfg.TAU_E_MAX)
+            self.w_ei = torch.full((B, N), cfg.W_EI, device=dev)
+            self.w_ie = torch.full((B, N), cfg.W_IE, device=dev)
+        self.dtype = torch.float32
+
+    def empty(self, B=None):
+        return GeneStack(self.cfg, B=(B if B is not None else self.P), device=self.device)
+
+    def fp32(self):
+        for g in self.GENES:
+            t = getattr(self, g)
+            if t is not None and t.dtype != torch.float32:
+                setattr(self, g, t.float())
+        self.dtype = torch.float32
+
+    def fp16(self):
+        if not getattr(self.cfg, 'USE_FP16', True):
+            self.fp32()
+            return
+        for g in self.GENES:
+            t = getattr(self, g)
+            if t is not None and t.dtype != torch.float16:
+                setattr(self, g, t.half())
+        self.dtype = torch.float16
+
+    def refresh_eff(self):
+        self.W_in_eff = self.W_in * self.M_in
+        self.W_rec_eff = self.W_rec * self.M_rec
+        self.W_out_eff = self.W_out * self.M_out
+
+    def _sub_len(self, idx):
+        if isinstance(idx, slice):
+            return len(range(*idx.indices(self.P)))
+        if isinstance(idx, torch.Tensor):
+            return int(idx.numel()) if idx.dtype != torch.bool else int(idx.sum().item())
+        if isinstance(idx, (list, np.ndarray)):
+            return len(idx)
+        return 1
+
+    def __getitem__(self, idx):
+        sub = self.empty(B=self._sub_len(idx))
+        for g in self.GENES:
+            setattr(sub, g, getattr(self, g)[idx])
+        for e in self.EFF:
+            t = getattr(self, e)
+            setattr(sub, e, t[idx] if t is not None else None)
+        sub.dtype = self.dtype
+        return sub
+
+    def clone_rows(self, idx):
+        sub = self[idx]
+        for g in self.GENES:
+            setattr(sub, g, getattr(sub, g).clone())
+        for e in self.EFF:
+            t = getattr(sub, e)
+            if t is not None:
+                setattr(sub, e, t.clone())
+        return sub
+
+    def individual_state(self, i, use_half=False):
+        dt = torch.float16 if use_half else torch.float32
+        cpu = torch.device('cpu')
+        with torch.no_grad():
+            st = {
+                'N': int(self.N),
+                'M_in': self.M_in[i].to(cpu, dtype=torch.uint8),
+                'M_rec': self.M_rec[i].to(cpu, dtype=torch.uint8),
+                'M_out': self.M_out[i].to(cpu, dtype=torch.uint8),
+                'W_in': self.W_in[i].to(cpu, dtype=dt),
+                'W_rec': self.W_rec[i].to(cpu, dtype=dt),
+                'W_out': self.W_out[i].to(cpu, dtype=dt),
+                'b_out': self.b_out[i].to(cpu, dtype=dt),
+                'tau_e_init': self.tau_e[i].to(cpu, dtype=dt),
+                'w_ei': self.w_ei[i].to(cpu, dtype=dt),
+                'w_ie': self.w_ie[i].to(cpu, dtype=dt),
+                'W_hormone1': torch.zeros(self.cfg.HORMONE_NET_HIDDEN, self.N * 3, dtype=dt),
+                'b_hormone1': torch.zeros(self.cfg.HORMONE_NET_HIDDEN, dtype=dt),
+                'W_excit': torch.zeros(self.N, self.cfg.HORMONE_NET_HIDDEN, dtype=dt),
+                'b_excit': torch.zeros(self.N, dtype=dt),
+                'W_inhib': torch.zeros(self.N, self.cfg.HORMONE_NET_HIDDEN, dtype=dt),
+                'b_inhib': torch.zeros(self.N, dtype=dt),
+            }
+        return st
+
+    def set_individual_from_state(self, i, st):
+        dev = self.device
+        with torch.no_grad():
+            self.M_in[i] = st['M_in'].float().to(dev)
+            self.M_rec[i] = st['M_rec'].float().to(dev)
+            self.M_out[i] = st['M_out'].float().to(dev)
+            self.W_in[i] = st['W_in'].float().to(dev)
+            self.W_rec[i] = st['W_rec'].float().to(dev)
+            self.W_out[i] = st['W_out'].float().to(dev)
+            self.b_out[i] = st['b_out'].float().to(dev)
+            self.tau_e[i] = st['tau_e_init'].float().to(dev)
+            self.w_ei[i] = st['w_ei'].float().to(dev)
+            self.w_ie[i] = st['w_ie'].float().to(dev)
+
+    def pack(self):
+        return {g: getattr(self, g).to('cpu').clone() for g in self.GENES}
+
+    def unpack(self, d):
+        dev = self.device
+        for g in self.GENES:
+            t = d[g].to(dev)
+            if getattr(self.cfg, 'USE_FP16', True) and g.startswith('W'):
+                t = t.half()
+            setattr(self, g, t)
+        self.dtype = torch.float16 if getattr(self.cfg, 'USE_FP16', True) else torch.float32
+
+
+# 方向表：0=(0,1) 1=(1,0) 2=(0,-1) 3=(-1,0)；左转=idx+3 mod4，右转=idx+1 mod4
+def _make_dirs(dev):
+    return torch.tensor([[0, 1], [1, 0], [0, -1], [-1, 0]], dtype=torch.long, device=dev)
+
+
+# ==========================================
+# 2. GPU 批量贪吃蛇环境（CRN 版）
+# ==========================================
+class BatchedSnakeEnv:
+    """B 个独立游戏并行（全部状态为 GPU 张量）。死亡个体冻结。
+
+    CRN 多库模式（bank={'stream':[E,DRAW,2], 'dir0':LongTensor[E]}）：
+      批维 B = 个体数 × E 局（行主序 p0e0,p0e1,...,p1e0,...），
+      e_id = 行号 // (B//E) 决定该行打第几个库的局；
+      - 初始朝向按库统一为 dir0[e_id]；
+      - 每次落子从自己库的公共流按个体消耗指针取候选，落在占用格则取
+        流中下一项（拒绝次数随个体体构差异，属正常 CRN 残差）。
+      给定库组与个体基因，各局完全确定 → 同库个体间比较无食物运气差异。
+      单库 bank={'stream':[DRAW,2],'dir0':int} 兼容（E=1）。
+    """
+
+    def __init__(self, cfg, B, device):
+        self.cfg = cfg
+        self.B = B
+        self.device = device
+        self.G = cfg.GRID_SIZE
+        self.MAXLEN = self.G * self.G
+        self.DIRS = _make_dirs(device)
+        self.mode24 = (getattr(cfg, 'OBS_MODE', '32proj') == '24')
+        self.crn = None
+        self.reset()
+
+    # ---------- 重置 ----------
+    def reset(self, bank=None):
+        B, G, dev = self.B, self.G, self.device
+        center = G // 2
+        self.crn = bank
+        self.draw_cnt = torch.zeros(B, dtype=torch.long, device=dev)
+        self.head = torch.full((B, 2), center, dtype=torch.long, device=dev)
+        if isinstance(bank, dict):
+            dir0 = bank['dir0']
+            if isinstance(dir0, torch.Tensor) and dir0.numel() > 1:
+                n = B // dir0.numel()
+                self.e_id = torch.arange(B, device=dev) // n
+                self.dir_idx = dir0[self.e_id]
+            else:
+                self.e_id = torch.zeros(B, dtype=torch.long, device=dev)
+                d0 = int(dir0.item() if isinstance(dir0, torch.Tensor) else dir0)
+                self.dir_idx = torch.full((B,), d0, dtype=torch.long, device=dev)
+        else:
+            self.e_id = torch.zeros(B, dtype=torch.long, device=dev)
+            self.dir_idx = torch.randint(0, 4, (B,), device=dev)
+        self.body = torch.zeros(B, self.MAXLEN, 2, dtype=torch.long, device=dev)
+        self.body[:, 0] = self.head
+        self.body[:, 1] = self.head - self.DIRS[self.dir_idx]
+        self.body_len = torch.full((B,), 2, dtype=torch.long, device=dev)
+        self.food = self._place_food_init()
+        self.alive = torch.ones(B, dtype=torch.bool, device=dev)
+        self.steps = torch.zeros(B, dtype=torch.long, device=dev)
+        self.steps_wo_food = torch.zeros(B, dtype=torch.long, device=dev)
+        self.ate = torch.zeros(B, dtype=torch.bool, device=dev)
+        self.died = torch.zeros(B, dtype=torch.long, device=dev)   # 0存活 1撞墙 2撞己 3饿死
+
+    def _next_cand(self):
+        """取下一批落子候选 [B,2]：CRN 从各自库的公共流按个体指针，非 CRN 随机。"""
+        if self.crn is not None:
+            stream = self.crn['stream']
+            idx = self.draw_cnt % stream.shape[-2]
+            self.draw_cnt += 1
+            if stream.dim() == 3:                     # 多库 [E,DRAW,2]
+                return stream[self.e_id, idx]
+            return stream[idx]                        # 单库 [DRAW,2]
+        return torch.randint(0, self.G, (self.B, 2), device=self.device)
+
+    def _place_food_init(self):
+        dev = self.device
+        B, G = self.B, self.G
+        head = self.head
+        neck = self.body[:, 1]
+        cand = self._next_cand()
+        bad = (cand == head).all(dim=1) | (cand == neck).all(dim=1)
+        for _ in range(31):
+            if not bad.any():
+                break
+            re = self._next_cand()
+            cand = torch.where(bad.unsqueeze(1), re, cand)
+            bad = (cand == head).all(dim=1) | (cand == neck).all(dim=1)
+        if bad.any():
+            occ = torch.zeros(B, G * G, dtype=torch.bool, device=dev)
+            occ[torch.arange(B, device=dev), head[:, 0] * G + head[:, 1]] = True
+            occ[torch.arange(B, device=dev), neck[:, 0] * G + neck[:, 1]] = True
+            free = (~occ).float()
+            idx = torch.argmax(free, dim=1)
+            fb = torch.stack((idx // G, idx % G), dim=1)
+            cand = torch.where(bad.unsqueeze(1), fb, cand)
+        return cand
+
+    def _place_food_after_eat(self, eat_mask):
+        B, G, dev = self.B, self.G, self.device
+        if not eat_mask.any():
+            return
+        occ = self._occupancy_flat()
+        occ_b = occ > 0.5
+        cand = self._next_cand()
+        bad = occ_b.gather(1, (cand[:, 0] * G + cand[:, 1]).unsqueeze(1)).squeeze(1)
+        for _ in range(31):
+            if not bad.any():
+                break
+            re = self._next_cand()
+            cand = torch.where(bad.unsqueeze(1), re, cand)
+            bad = occ_b.gather(1, (cand[:, 0] * G + cand[:, 1]).unsqueeze(1)).squeeze(1)
+        if bad.any():
+            free = (~occ_b).float()
+            idx = torch.argmax(free, dim=1)
+            fb = torch.stack((idx // G, idx % G), dim=1)
+            cand = torch.where(bad.unsqueeze(1), fb, cand)
+        new_food = torch.where(eat_mask.unsqueeze(1), cand, self.food)
+        self.food = new_food
+
+    def _occupancy_flat(self, tail_invalid=False):
+        """[B, G*G] 占用图（bool 计 1）；tail_invalid=True 排除尾节。"""
+        B, G, dev = self.B, self.G, self.device
+        flat = self.body[:, :, 0] * G + self.body[:, :, 1]
+        valid = torch.arange(self.MAXLEN, device=dev)[None, :] < self.body_len[:, None]
+        if tail_invalid:
+            valid &= torch.arange(self.MAXLEN, device=dev)[None, :] < (self.body_len - 1)[:, None]
+        occ = torch.zeros(B, G * G, dtype=torch.float32, device=dev)
+        occ.scatter_add_(1, flat.clamp(max=G * G - 1), valid.float())
+        return occ
+
+    # ---------- 观测（与 test7g 一致：曼哈顿食物扇区 + 1/k 身体/障碍扇区）----------
+    def obs(self):
+        if self.mode24:
+            return self._obs24()
+        return self._obs32()
+
+    def _obs24(self):
+        B, G, dev = self.B, self.G, self.device
+        head, food = self.head, self.food
+        d = self.DIRS[self.dir_idx]
+        dx = food[:, 0] - head[:, 0]
+        dy = food[:, 1] - head[:, 1]
+        left = self.DIRS[(self.dir_idx + 3) % 4]
+        right = self.DIRS[(self.dir_idx + 1) % 4]
+
+        obs = torch.zeros(B, 24, dtype=torch.float32, device=dev)
+        obs[:, 0] = (dx * d[:, 0] + dy * d[:, 1] > 0).float()
+        obs[:, 1] = (dx * left[:, 0] + dy * left[:, 1] > 0).float()
+        obs[:, 2] = (dx * right[:, 0] + dy * right[:, 1] > 0).float()
+        obs[:, 3] = torch.clamp(torch.hypot(dx.float(), dy.float()) / (G * math.sqrt(2)), 0, 1)
+
+        will_eat = ((head + d) == food).all(dim=1)
+        occ = self._occupancy_flat(tail_invalid=True)
+        occ_eat = self._occupancy_flat(tail_invalid=False)
+        occ_use = torch.where(will_eat[:, None], occ_eat, occ)
+
+        ray_dirs = [left, (left + d), d, (d + right), right]
+        for i, rd in enumerate(ray_dirs):
+            fp, fs = self._cast_ray(rd, occ_use)
+            obs[:, 4 + i * 2] = fp
+            obs[:, 4 + i * 2 + 1] = fs
+
+        segs = self.body
+        wx = segs[:, :, 0] - head[:, None, 0]
+        wy = segs[:, :, 1] - head[:, None, 1]
+        rot_x = wx * d[:, None, 0] + wy * d[:, None, 1]
+        rot_y = -wx * d[:, None, 1] + wy * d[:, None, 0]
+        ang = torch.atan2(rot_y, rot_x) * 180.0 / math.pi
+        ang = torch.where(ang < 0, ang + 360.0, ang)
+        bucket = ((ang + 22.5) // 45).long() % 8
+        close = 1.0 - torch.clamp(torch.hypot(wx.float(), wy.float()) / (G * math.sqrt(2)), 0, 1)
+        valid = (torch.arange(self.MAXLEN, device=dev)[None, :] < self.body_len[:, None])
+        valid &= (torch.arange(self.MAXLEN, device=dev)[None, :] > 0)
+        close = torch.where(valid, close, torch.zeros_like(close))
+        for k in range(8):
+            m_ = (bucket == k) & valid
+            obs[:, 14 + k] = (close * m_).max(dim=1).values
+
+        ar = torch.arange(B, device=dev)
+        tail = self.body[ar, (self.body_len - 1).clamp(min=0)]
+        twx = tail[:, 0] - head[:, 0]
+        twy = tail[:, 1] - head[:, 1]
+        obs[:, 22] = (twx * d[:, 0] + twy * d[:, 1]).float() / G
+        obs[:, 23] = (-twx * d[:, 1] + twy * d[:, 0]).float() / G
+
+        return obs
+
+    def _obs32(self):
+        """32 维投影观测（食物扇区曼哈顿度量；身体/障碍 1/k 邻近度）。"""
+        B, G, dev = self.B, self.G, self.device
+        head = self.head
+        food = self.food
+        d = self.DIRS[self.dir_idx]                       # [B,2]
+
+        obs = torch.zeros(B, 32, dtype=torch.float32, device=dev)
+
+        # --- [0:4] 蛇首方向 one-hot ---
+        obs[:, 0] = ((d[:, 0] == 0) & (d[:, 1] == 1)).float()
+        obs[:, 1] = ((d[:, 0] == 1) & (d[:, 1] == 0)).float()
+        obs[:, 2] = ((d[:, 0] == 0) & (d[:, 1] == -1)).float()
+        obs[:, 3] = ((d[:, 0] == -1) & (d[:, 1] == 0)).float()
+
+        # --- [4:8] 蛇尾方向 one-hot ---
+        tail = self.body[torch.arange(B, device=dev), (self.body_len - 1).clamp(min=0)]
+        prev = self.body[torch.arange(B, device=dev), (self.body_len - 2).clamp(min=0)]
+        tail_dr = prev[:, 0] - tail[:, 0]
+        tail_dc = prev[:, 1] - tail[:, 1]
+        obs[:, 4] = ((tail_dr == 0) & (tail_dc == 1)).float()
+        obs[:, 5] = ((tail_dr == 1) & (tail_dc == 0)).float()
+        obs[:, 6] = ((tail_dr == 0) & (tail_dc == -1)).float()
+        obs[:, 7] = ((tail_dr == -1) & (tail_dc == 0)).float()
+
+        # --- 相对方向：[前, 左前, 左, 左后, 后, 右后, 右, 右前] ---
+        left = self.DIRS[(self.dir_idx + 3) % 4]
+        right = self.DIRS[(self.dir_idx + 1) % 4]
+        d8 = [
+            d,                           # 0 前
+            d + left,                    # 1 左前
+            left,                        # 2 左
+            left - d,                    # 3 左后
+            -d,                          # 4 后
+            right - d,                   # 5 右后
+            right,                       # 6 右
+            d + right,                   # 7 右前
+        ]
+
+        # --- [8:16] 食物 8 扇区投影 ---
+        # 曼哈顿一致（默认）：û 原始整数向量，分母 (|dr|+|dc|)²，同 d1 最强扇区
+        #   信号恒等于 K/d1²，与方位无关（欧氏对角偏置 √2 已验证为错误启发）。
+        # 欧氏分支仅为 pre-7g 模型（如 7b）诊断评估保留，训练不得使用。
+        ar = torch.arange(B, device=dev)
+        vr = (food[:, 0] - head[:, 0]).float()
+        vc = (food[:, 1] - head[:, 1]).float()
+        manhattan = bool(getattr(self.cfg, 'OBS_MANHATTAN', True))
+        d2 = ((vr.abs() + vc.abs()).clamp(min=1.0)) if manhattan else \
+             (vr * vr + vc * vc).clamp(min=1.0)
+        k_scale = float(getattr(self.cfg, 'OBS_FOOD_SCALE', 1.0))
+        for i in range(8):
+            dx = d8[i][:, 0].float()
+            dy = d8[i][:, 1].float()
+            if manhattan:
+                dot = vr * dx + vc * dy                  # û 原始整数向量
+            else:
+                norm = torch.sqrt(dx * dx + dy * dy)     # 1 或 √2
+                dot = (vr * dx + vc * dy) / norm
+            obs[:, 8 + i] = torch.clamp(dot, min=0.0) / d2 * k_scale
+
+        # --- [16:24] 自身 8 扇区距离倒数 ---
+        flat_body = self.body[:, :, 0] * G + self.body[:, :, 1]
+        seg_idx = torch.arange(self.MAXLEN, device=dev)
+        seg_valid = (seg_idx[None, :] >= 1) & (seg_idx[None, :] < self.body_len[:, None])
+        bf = torch.zeros(B, G * G, dtype=torch.long, device=dev)
+        bf.scatter_add_(1, flat_body.clamp(max=G * G - 1), seg_valid.long())
+        body_set_mask = bf.view(B, G, G) > 0
+
+        for i in range(8):
+            ddr, ddc = d8[i][:, 0], d8[i][:, 1]
+            dist = torch.full((B,), float(G + 1), device=dev)
+            prev_ok = torch.ones(B, dtype=torch.bool, device=dev)
+            for k in range(1, G + 1):
+                r = head[:, 0] + ddr * k
+                c = head[:, 1] + ddc * k
+                inb = (r >= 0) & (r < G) & (c >= 0) & (c < G)
+                r_clamp = r.clamp(0, G - 1)
+                c_clamp = c.clamp(0, G - 1)
+                hit_body = body_set_mask[ar, r_clamp, c_clamp] & inb
+                dist = torch.where(prev_ok & hit_body,
+                                   torch.full_like(dist, float(k)), dist)
+                prev_ok = prev_ok & (~hit_body) & inb
+            obs[:, 16 + i] = torch.where(dist <= G, 1.0 / dist, torch.zeros_like(dist))
+        k_self = float(getattr(self.cfg, 'OBS_SELF_SCALE', 1.0))
+        if k_self != 1.0:
+            obs[:, 16:24] = obs[:, 16:24] * k_self
+
+        # --- [24:32] 障碍 8 扇区距离倒数（邻近度语义：对角不折算）---
+        for i in range(8):
+            ddr, ddc = d8[i][:, 0], d8[i][:, 1]
+            dist = torch.full((B,), float(G), device=dev)
+            prev_ok = torch.ones(B, dtype=torch.bool, device=dev)
+            for k in range(1, G + 1):
+                r = head[:, 0] + ddr * k
+                c = head[:, 1] + ddc * k
+                inb = (r >= 0) & (r < G) & (c >= 0) & (c < G)
+                r_clamp = r.clamp(0, G - 1)
+                c_clamp = c.clamp(0, G - 1)
+                hit_wall = ~inb
+                hit_body = body_set_mask[ar, r_clamp, c_clamp] & inb
+                blocked = hit_wall | hit_body
+                dist = torch.where(prev_ok & blocked,
+                                   torch.full_like(dist, float(k)), dist)
+                prev_ok = prev_ok & (~blocked)
+            obs[:, 24 + i] = 1.0 / dist
+
+        # 身后约定：障碍数 = sqrt(蛇身长度/格子度)
+        obs[:, 28] = torch.sqrt(self.body_len.float().clamp(min=1) / self.G)
+        k_obs = float(getattr(self.cfg, 'OBS_OBSTACLE_SCALE', 1.0))
+        if k_obs != 1.0:
+            obs[:, 24:32] = obs[:, 24:32] * k_obs
+
+        return obs
+
+    def _cast_ray(self, rd, occ):
+        """沿射线扫描，返回 (free_path 归一化长度, food_signal)。"""
+        B, G, dev = self.B, self.G, self.device
+        head = self.head
+        food = self.food
+        first_blocked = torch.full((B,), G + 1, dtype=torch.float32, device=dev)
+        food_dist = torch.zeros(B, dtype=torch.float32, device=dev)
+        prev_ok = torch.ones(B, dtype=torch.bool, device=dev)
+        ar = torch.arange(B, device=dev)
+        for k in range(1, G + 1):
+            pos = head + rd * k
+            r, c = pos[:, 0], pos[:, 1]
+            inb = (r >= 0) & (r < G) & (c >= 0) & (c < G)
+            on_body = occ[ar, r.clamp(0, G - 1) * G + c.clamp(0, G - 1)] > 0.5
+            blocked = (~inb) | on_body
+            first_blocked = torch.where(prev_ok & blocked,
+                                        torch.full_like(first_blocked, float(k)),
+                                        first_blocked)
+            food_dist = torch.where(prev_ok & (pos == food).all(dim=1),
+                                    torch.full_like(food_dist, float(k)),
+                                    food_dist)
+            prev_ok = prev_ok & (~blocked)
+        free_path = torch.where(first_blocked > G,
+                                torch.full_like(first_blocked, float(G)),
+                                first_blocked) / G
+        fd = torch.where(food_dist > 0, 1.0 - food_dist / G, 0.0)
+        return free_path.clamp(0, 1), fd
+
+    def sees_food(self, obs):
+        if self.mode24:
+            return obs[:, 5:14:2].max(dim=1).values > 0.0
+        return obs[:, 8:16].max(dim=1).values > 0.0
+
+    # ---------- 步进 ----------
+    def step(self, actions):
+        B, dev = self.B, self.device
+        nd_idx = torch.where(actions == 1, (self.dir_idx + 3) % 4, self.dir_idx)
+        nd_idx = torch.where(actions == 2, (self.dir_idx + 1) % 4, nd_idx)
+        self.dir_idx = nd_idx
+        nd = self.DIRS[nd_idx]
+
+        alive_f = self.alive
+        self.steps = torch.where(alive_f, self.steps + 1, self.steps)
+        self.steps_wo_food = torch.where(alive_f, self.steps_wo_food + 1, self.steps_wo_food)
+
+        next_head = self.head + nd
+        out_b = ((next_head[:, 0] < 0) | (next_head[:, 0] >= self.G) |
+                 (next_head[:, 1] < 0) | (next_head[:, 1] >= self.G))
+
+        will_eat = (next_head == self.food).all(dim=1)
+        occ = self._occupancy_flat(tail_invalid=True)
+        occ_eat = self._occupancy_flat(tail_invalid=False)
+        occ_use = torch.where(will_eat[:, None], occ_eat, occ)
+        ar = torch.arange(B, device=dev)
+        hit = occ_use[ar, next_head[:, 0].clamp(0, self.G - 1) * self.G
+                      + next_head[:, 1].clamp(0, self.G - 1)] > 0.5
+        crash = alive_f & (out_b | hit)
+
+        move = alive_f & (~crash)
+        shifted = torch.zeros_like(self.body)
+        shifted[:, 0] = next_head
+        shifted[:, 1:] = self.body[:, :-1]
+        self.body = torch.where(move[:, None, None], shifted, self.body)
+        self.head = torch.where(move[:, None], next_head, self.head)
+
+        ate = move & will_eat
+        self.body_len = torch.where(move, (self.body_len + ate.long()).clamp(max=self.MAXLEN),
+                                    self.body_len)
+        self.steps_wo_food = torch.where(ate, torch.zeros_like(self.steps_wo_food),
+                                         self.steps_wo_food)
+        self._place_food_after_eat(ate)
+
+        starve = self.steps_wo_food > (float(getattr(self.cfg, 'STARVE_SLOPE', 3.0))
+                                       * self.body_len.float() + 20)
+        self.alive = alive_f & (~crash) & (~starve)
+        crash_wall = alive_f & out_b
+        crash_self = alive_f & (~out_b) & hit
+        starve_now = alive_f & (~crash) & starve
+        died_now = torch.where(crash_wall, 1,
+                               torch.where(crash_self, 2,
+                                           torch.where(starve_now, 3,
+                                                       torch.zeros_like(self.steps))))
+        self.died = torch.where((self.died == 0) & (died_now > 0), died_now, self.died)
+        self.ate = ate
+
+    def all_done(self):
+        return not bool(self.alive.any().item())
+
+
+# ==========================================
+# 3. 批量前向（无激素 E-I 动力学）
+# ==========================================
+def forward_batch(pop, obs, E, I, st, press, cfg):
+    """单次 E-I 迭代（B 个个体并行，无激素支路）。与 test7g 一致；
+    FATIGUE_TURN_GAIN=0 时 press 惩罚项为 0（疲劳彻底关闭）。"""
+    ext = torch.bmm(pop.W_in_eff, obs.unsqueeze(-1)).squeeze(-1)
+    rec = torch.bmm(pop.W_rec_eff, E.unsqueeze(-1)).squeeze(-1)
+    total = ext + rec
+
+    st = cfg.SHORT_TERM_DECAY * st + (1 - cfg.SHORT_TERM_DECAY) * E
+    tau = (pop.tau_e + cfg.SHORT_TERM_GAIN * st).clamp(cfg.TAU_E_MIN, cfg.TAU_E_MAX)
+    w_ei = pop.w_ei.clamp(cfg.W_EI_MIN, cfg.W_EI_MAX)
+    w_ie = pop.w_ie.clamp(cfg.W_IE_MIN, cfg.W_IE_MAX)
+
+    E_new = torch.sigmoid(total + tau * E - w_ei * I)
+    I_new = torch.sigmoid(w_ie * E_new)
+
+    logits = torch.bmm(pop.W_out_eff, E_new.unsqueeze(-1)).squeeze(-1) + pop.b_out
+    gain = float(getattr(cfg, 'FATIGUE_TURN_GAIN', 0.0))
+    if gain != 0.0:
+        logits[:, 1:] = logits[:, 1:] - gain * press.unsqueeze(1).to(logits.dtype)
+    return logits, E_new, I_new, st
+
+
+def update_fatigue(press, action, decay=None):
+    if decay is None:
+        decay = 0.7
+    return press * decay + (action != 0).to(press.dtype)
+
+
+def deliberate_batch(pop, obs, E, I, st, press, cfg):
+    """K 倍帧率思考：内部迭代 K 次，logits 平均后 argmax。"""
+    K = cfg.FRAME_RATE
+    logits_sum = None
+    for k in range(K):
+        o = obs * (cfg.INPUT_DECAY ** k)
+        logits, E, I, st = forward_batch(pop, o, E, I, st, press, cfg)
+        logits_sum = logits if logits_sum is None else logits_sum + logits
+    action = torch.argmax(logits_sum, dim=1)
+    return action, E, I, st
+
+
+# ==========================================
+# 4. 种群评估（CRN + 两阶段淘汰）
+# ==========================================
+def reach_ratio(env):
+    """从蛇头可达的自由格占比 [B]（仅观测用，不进适应度）。"""
+    B, G, dev = env.B, env.G, env.device
+    occ = env._occupancy_flat(tail_invalid=True).view(B, 1, G, G)
+    free = occ < 0.5
+    reach = torch.zeros(B, 1, G, G, device=dev)
+    reach[torch.arange(B, device=dev), 0, env.head[:, 0], env.head[:, 1]] = 1.0
+    mp = torch.nn.functional.max_pool2d
+    for _ in range(G * G):
+        cross = torch.maximum(mp(reach, (3, 1), stride=1, padding=(1, 0)),
+                              mp(reach, (1, 3), stride=1, padding=(0, 1)))
+        reach = cross * free
+    free_cnt = free.sum(dim=(1, 2, 3)).float()
+    reach_cnt = (reach > 0).float().sum(dim=(1, 2, 3))
+    return torch.where(free_cnt > 0, reach_cnt / free_cnt.clamp(min=1.0),
+                       torch.ones_like(reach_cnt))
+
+
+def _eval_sweep_chunk(pop_rep, cfg, bank):
+    """单次扫描：pop_rep 为个体×E 复制（行主序 p0e0..p0e{E-1},p1e0..），每行打
+    bank 中 e_id 对应库的局。返回 [pop_rep.P, 12] 单局指标（无跨局平均）。"""
+    B = pop_rep.P
+    dev = pop_rep.device
+    N = pop_rep.N
+    env = BatchedSnakeEnv(cfg, B, dev)
+    use_crn = bank is not None
+    env.reset(bank=bank if use_crn else None)
+    half = torch.float16 if getattr(cfg, 'USE_FP16', True) else torch.float32
+
+    tot_food = torch.zeros(B, dtype=torch.float32, device=dev)
+    tot_seen = torch.zeros(B, dtype=torch.float32, device=dev)
+    tot_unseen = torch.zeros(B, dtype=torch.float32, device=dev)
+    tot_last = torch.zeros(B, dtype=torch.float32, device=dev)
+    tot_prox = torch.zeros(B, dtype=torch.float32, device=dev)
+    tot_wall = torch.zeros(B, dtype=torch.float32, device=dev)
+    tot_self = torch.zeros(B, dtype=torch.float32, device=dev)
+    tot_starve = torch.zeros(B, dtype=torch.float32, device=dev)
+    tot_act1 = torch.zeros(B, dtype=torch.float32, device=dev)
+    tot_act2 = torch.zeros(B, dtype=torch.float32, device=dev)
+    tot_turn_last = torch.zeros(B, dtype=torch.float32, device=dev)
+    tot_reach = torch.zeros(B, dtype=torch.float32, device=dev)
+    tot_reach_n = torch.zeros(B, dtype=torch.float32, device=dev)
+
+    E = torch.zeros(B, N, dtype=half, device=dev)
+    I = torch.zeros(B, N, dtype=half, device=dev)
+    st = torch.zeros(B, N, dtype=half, device=dev)
+    press = torch.zeros(B, dtype=torch.float32, device=dev)
+    last = torch.zeros(B, dtype=torch.float32, device=dev)
+    turn_cnt = torch.zeros(B, dtype=torch.float32, device=dev)
+    turn_last = torch.zeros(B, dtype=torch.float32, device=dev)
+
+    for t in range(cfg.MAX_STEPS):
+        al = env.alive
+        obs = env.obs().to(half)
+        sees = env.sees_food(obs)
+        tot_seen += (al & sees).float()
+        tot_unseen += (al & (~sees)).float()
+        fr = (env.food[:, 0] - env.head[:, 0]).float()
+        fc = (env.food[:, 1] - env.head[:, 1]).float()
+        dist = torch.sqrt(fr * fr + fc * fc).clamp(min=1.0)
+        tot_prox += al.float() / dist
+
+        act, E, I, st = deliberate_batch(pop_rep, obs, E, I, st, press, cfg)
+        press = update_fatigue(press, act, decay=float(cfg.FATIGUE_TURN_DECAY))
+        tot_act1 += (al & (act == 1)).float()
+        tot_act2 += (al & (act == 2)).float()
+        turn_cnt += (al & (act != 0)).float()
+
+        env.step(act)
+        ate_now = al & env.ate
+        tot_food += ate_now.float()
+        last = torch.where(ate_now, torch.full_like(last, float(t + 1)), last)
+        turn_last = torch.where(ate_now, turn_cnt, turn_last)
+        if ate_now.any():
+            rr = reach_ratio(env)
+            tot_reach += rr * ate_now.float()
+            tot_reach_n += ate_now.float()
+        if env.all_done():
+            break
+
+    prox = tot_prox / torch.clamp(tot_seen + tot_unseen, min=1e-6)
+    avg_reach = tot_reach / tot_reach_n.clamp(min=1.0)
+    metrics = torch.stack((tot_food, tot_seen, tot_unseen, last, prox,
+                           tot_wall + (env.died == 1).float(),
+                           tot_self + (env.died == 2).float(),
+                           tot_starve + (env.died == 3).float(),
+                           tot_act1, tot_act2, turn_last, avg_reach), dim=1)
+    return metrics
+
+
+def apply_weak_mask(pop, cfg):
+    """评估期弱连接屏蔽（原地作用于 pop 的 W_rec——pop[idx] 是拷贝，基因栈安全）：
+    每个体活跃连接中 |W_rec| 最小的 WEAK_MASK_FRAC 比例置零。
+    逐行 kthvalue 阈值实现（避免 CUDA sort/gather 与 inf 哨兵的兼容性问题；
+    阈值上的并列幅值可能多置零数个，确定性无碍）。"""
+    frac = float(getattr(cfg, 'WEAK_MASK_FRAC', 0.0))
+    if frac <= 0 or pop.W_rec is None:
+        return
+    with torch.no_grad():
+        W = pop.W_rec.float()
+        M = pop.M_rec
+        mag = W.abs() * M
+        keep = M > 0
+        for r in range(W.shape[0]):
+            m_r = mag[r][keep[r]]
+            if m_r.numel() == 0:
+                continue
+            kk = int(math.ceil(m_r.numel() * frac))
+            if kk <= 0:
+                continue
+            thr = torch.kthvalue(m_r, kk).values
+            zero = keep[r] & (mag[r] <= thr)
+            W[r] = torch.where(zero, torch.zeros_like(W[r]), W[r])
+        pop.W_rec = W.to(pop.dtype)
+
+
+def _eval_pop_banks(pop, cfg, banks):
+    """E=len(banks) 局并行评估：个体×E 复制进同一批扫描（局维折叠，扫描次数
+    不随局数增长——GPU 利用率低时墙上时间 ∝ 扫描次数而非局数）。
+    所有分块共用同一组 banks（CRN 关键）；评估副本先做弱连接屏蔽。
+    返回 [P,12] = E 局均值。"""
+    E = len(banks)
+    dev = pop.device
+    use_crn = banks[0] is not None
+    if use_crn:
+        bank = {'stream': torch.stack([b['stream'] for b in banks]),
+                'dir0': torch.tensor([b['dir0'] for b in banks],
+                                     dtype=torch.long, device=dev)}
+    else:
+        bank = None
+    max_B = _auto_eval_batch(cfg, dev)
+    per_P = max(1, max_B // E)
+    out = torch.zeros(pop.P, 12)
+    for lo in range(0, pop.P, per_P):
+        hi = min(lo + per_P, pop.P)
+        n = hi - lo
+        idx = torch.arange(lo, hi, device=dev).repeat(E)   # 块布局：e = 行 // n
+        sub = pop[idx]                                      # 高级索引=拷贝，可安全屏蔽
+        apply_weak_mask(sub, cfg)
+        sub.refresh_eff()
+        m = _eval_sweep_chunk(sub, cfg, bank).cpu()
+        out[lo:hi] = m.view(E, n, 12).mean(dim=0)
+    return out
+
+
+def evaluate_population_gpu(pop, cfg, gen=0):
+    """两阶段淘汰评估（CRN）：
+    阶段1：全种群 × K1 局（同库精确可比）→ 保前 STAGE2_KEEP；
+    阶段2：幸存者 × K2 局（新库），幸存者指标 = (K1·m1 + K2·m2)/(K1+K2)。
+    返回 (metrics[P,12], order[P])：order = 幸存者按累计适应度降序，
+    其后为落选者按阶段1适应度降序——精英只能出自幸存者。
+    test11 分派：SELECTION_MODE='tournament' 时转锦标赛淘汰制（见下）。
+    """
+    if str(getattr(cfg, 'SELECTION_MODE', 'two_stage')) == 'tournament':
+        return evaluate_tournament(pop, cfg, gen)
+    if getattr(cfg, 'USE_FP16', True):
+        pop.fp16()
+    key_fn = _make_key_fn(cfg)
+    P = pop.P
+    use_crn = bool(getattr(cfg, 'USE_CRN', True))
+    dev = pop.device
+    K1 = int(getattr(cfg, 'STAGE1_EPS', 3))
+    K2 = int(cfg.EVAL_EPISODES)
+    two_stage = (getattr(cfg, 'STAGE2_KEEP', 0) >= cfg.ELITE_SIZE
+                 and K1 > 0 and K2 > K1)
+
+    m1 = _eval_pop_banks(pop, cfg,
+                         make_banks(cfg, gen, 1, K1, dev) if use_crn else [None] * K1)
+    mn1 = m1.numpy()
+    # sorted(reverse=True) 稳定排序，且兼容 tuple 字典序适应度（np.argsort 不行）
+    order1 = sorted(range(P), key=lambda i: key_fn(mn1[i]), reverse=True)
+    if not two_stage:
+        return m1, order1
+
+    keep = min(int(getattr(cfg, 'STAGE2_KEEP', 410)), P)
+    surv_idx = order1[:keep]
+    surv_set = set(surv_idx)
+    sub = pop[surv_idx]
+    m2 = _eval_pop_banks(sub, cfg,
+                         make_banks(cfg, gen, 2, K2, dev) if use_crn else [None] * K2)
+
+    metrics = m1.clone()
+    metrics[surv_idx] = (K1 * m1[surv_idx] + K2 * m2) / (K1 + K2)
+    mn = metrics.numpy()
+    # 幸存者按累计适应度降序在前；落选者按阶段1适应度降序垫后（无精英资格）
+    surv_rank = sorted(surv_idx, key=lambda i: key_fn(mn[i]), reverse=True)
+    out_rank = [i for i in order1 if i not in surv_set]
+    return metrics, surv_rank + out_rank
+
+
+# ==========================================
+# 4b. 锦标赛淘汰制筛选（test11 实验变量）
+# ==========================================
+def _tourn_pairing_seed(cfg, gen, rnd):
+    """锦标赛配对洗牌种子（跨进程确定；独立 Generator，不消耗全局 RNG，
+    保证 two_stage 模式与 test7h 逐位一致）。"""
+    return (int(cfg.CRN_SEED) * 1000003 + int(gen) * 1009
+            + int(rnd) * 101 + 7) % (2 ** 63 - 1)
+
+
+def evaluate_tournament(pop, cfg, gen=0, _eval_fn=None):
+    """锦标赛淘汰制（逐轮加赛两两对比，CRN 同库精确可比）：
+    每轮全体幸存者 ×K=TOURN_K 局新库（stage=轮次），指标累计为加权均值，
+    再两两配对淘汰一半，直到剩下 ELITE_SIZE：
+      - random：随机洗牌配对，对内累计分高者晋级（奇数末位轮空；轮空致
+        幸存数超出/不足 keep_n 时按累计分裁尾/补齐）——默认，用户的"两两对比"；
+      - rank：按累计分排序砍半（消融变体：无爆冷，隔离配对随机性）。
+    返回 (metrics[P,12], order[P])：metrics=每个体出局/夺冠时的累计均值指标；
+    order = 精英按终轮累计分降序在前，各轮淘汰者按各自累计分降序依次垫后
+    （越早淘汰越靠后）——精英只能出自最终幸存者。
+    默认规模 2048→1024→512→256 共 3 轮：3×3584 = 10752 局次/代（二阶段
+    10244 的 +5%），精英判据累计 9 局（二阶段 13 局）。
+    """
+    if getattr(cfg, 'USE_FP16', True) and hasattr(pop, 'fp16'):
+        pop.fp16()
+    if _eval_fn is None:
+        _eval_fn = _eval_pop_banks
+    key_fn = _make_key_fn(cfg)
+    P = pop.P
+    use_crn = bool(getattr(cfg, 'USE_CRN', True))
+    dev = pop.device
+    K = int(getattr(cfg, 'TOURN_K', 3))
+    pairing = str(getattr(cfg, 'TOURN_PAIRING', 'random'))
+    elite = int(cfg.ELITE_SIZE)
+    if K <= 0:
+        raise ValueError(f'TOURN_K 必须 >0，当前 {K}')
+
+    cur = list(range(P))
+    cum = torch.zeros(P, 12)
+    cnt = torch.zeros(P)
+    elim_blocks = []                       # 各轮淘汰名单（轮内按累计分降序）
+    used_slots = 0
+    rnd = 0
+    while len(cur) > elite:
+        rnd += 1
+        banks = make_banks(cfg, gen, rnd, K, dev) if use_crn else [None] * K
+        m = _eval_fn(pop[cur], cfg, banks)             # [n,12] 本轮 E 局均值
+        c = cnt[cur]
+        cum[cur] = (c.unsqueeze(1) * cum[cur] + K * m) / (c + K).unsqueeze(1)
+        cnt[cur] = c + K
+        used_slots += len(cur) * K
+        mn = cum[cur].numpy()
+        keyed = sorted(range(len(cur)), key=lambda j: key_fn(mn[j]), reverse=True)
+        keep_n = max(elite, len(cur) // 2)
+        if pairing == 'rank':
+            winners = keyed[:keep_n]
+        else:
+            g = torch.Generator().manual_seed(_tourn_pairing_seed(cfg, gen, rnd))
+            perm = torch.randperm(len(cur), generator=g).tolist()
+            winners = []
+            for a in range(0, len(perm) - 1, 2):       # 相邻配对，高分晋级
+                i1, i2 = perm[a], perm[a + 1]
+                winners.append(i1 if key_fn(mn[i1]) >= key_fn(mn[i2]) else i2)
+            if len(perm) % 2 == 1:                     # 奇数：末位轮空
+                winners.append(perm[-1])
+            winners.sort(key=lambda j: key_fn(mn[j]), reverse=True)
+            if len(winners) > keep_n:                  # 轮空超额：裁掉累计分最低者
+                winners = winners[:keep_n]
+            while len(winners) < keep_n:               # 轮空不足：按累计分补齐
+                wset = set(winners)
+                for j in keyed:
+                    if j not in wset:
+                        winners.append(j)
+                        break
+                else:
+                    break
+        win_set = set(winners)
+        elim_blocks.append([cur[j] for j in keyed if j not in win_set])
+        cur = [cur[j] for j in winners]
+
+    if bool(getattr(cfg, 'TOURN_FINAL_PASS', False)) and cur:
+        # 可选精英终轮加赛：stage=9 避开轮次种子段
+        banks = make_banks(cfg, gen, 9, K, dev) if use_crn else [None] * K
+        m = _eval_fn(pop[cur], cfg, banks)
+        c = cnt[cur]
+        cum[cur] = (c.unsqueeze(1) * cum[cur] + K * m) / (c + K).unsqueeze(1)
+        cnt[cur] = c + K
+        used_slots += len(cur) * K
+
+    final_rank = sorted(range(len(cur)),
+                        key=lambda j: key_fn(cum[cur[j]].numpy()), reverse=True)
+    order = [cur[j] for j in final_rank]
+    for block in reversed(elim_blocks):                # 越晚出局越靠近精英
+        order.extend(block)
+    assert len(order) == P and len(set(order)) == P, '锦标赛 order 覆盖性校验失败'
+    if bool(getattr(cfg, 'PRINT_SLOTS', False)):
+        print(f'  [锦标赛] gen={gen} 轮数={rnd} 账面局次={used_slots}')
+    return cum, order
+
+
+# ==========================================
+# 5. 进化（类正态变异强度 + GPU 向量化交叉/变异）
+# ==========================================
+def sample_mut_scale(cfg, B2, dev):
+    """每子代变异强度因子 s：lognormal（右偏，大变异小概率）或 normal clip。"""
+    sigma = float(getattr(cfg, 'MUT_SCALE_SIGMA', 0.4))
+    if getattr(cfg, 'MUT_SCALE_DIST', 'lognormal') == 'normal':
+        s = 1.0 + torch.randn(B2, device=dev) * sigma
+    else:
+        s = torch.exp(torch.randn(B2, device=dev) * sigma)   # LogNormal(0, σ)
+    return s.clamp(float(getattr(cfg, 'MUT_SCALE_MIN', 0.25)),
+                   float(getattr(cfg, 'MUT_SCALE_MAX', 4.0)))
+
+
+def evolve_topology_gpu(pop, metrics, cfg, gen=0, order=None):
+    """进化下一代：ELITE 精英 + (P-ELITE) 后代（交叉同 test7g）。
+
+    变异强度：每子代抽因子 s（类正态分布）缩放其全部变异算子。
+    order：evaluate_population_gpu 给出的排序（幸存者优先），缺省时按适应度自排。
+    """
+    P = pop.P
+    N = pop.N
+    dev = pop.device
+    active = _freeze_active_groups(gen, cfg)
+    has_g1 = 'G1' in active
+    has_g2 = 'G2' in active
+
+    # --- 精英排序 ---
+    if order is None:
+        mn = metrics.cpu().numpy()
+        key_fn = _make_key_fn(cfg)
+        order = sorted(range(P), key=lambda i: key_fn(mn[i]), reverse=True)
+    elite_idx = order[:cfg.ELITE_SIZE]
+    elites = pop[elite_idx]
+
+    new_pop = pop.empty()
+    children = pop.empty(B=P - cfg.ELITE_SIZE)
+    for g in GeneStack.GENES:
+        setattr(children, g, torch.empty(P - cfg.ELITE_SIZE, *getattr(elites, g).shape[1:],
+                                         dtype=getattr(elites, g).dtype, device=dev))
+
+    # --- 后代：父代采样 + 交叉 ---
+    E = cfg.ELITE_SIZE
+    B2 = P - E
+    p1_idx = torch.randint(0, E, (B2,), device=dev)
+    p2_idx = torch.randint(0, E, (B2,), device=dev)
+    p2_idx = torch.where(p2_idx == p1_idx, (p1_idx + 1) % E, p2_idx)
+
+    p1 = elites[p1_idx]
+    p2 = elites[p2_idx]
+
+    # --- 每子代变异强度因子（lognormal 中位数 1 = 原强度；右偏大变异）---
+    s = sample_mut_scale(cfg, B2, dev)
+    topo_mut_prob_i = (cfg.TOPOLOGY_MUT_PROB * s).clamp(max=0.5)          # [B2]
+    mask_mut_rate_i = (cfg.MUT_RATE * s).clamp(max=0.5)                   # [B2]
+    weight_frac1 = (cfg.WEIGHT_MUT_FRAC * s).clamp(max=1.0)               # [B2]
+    weight_std1 = (cfg.WEIGHT_MUT_STD * s)                                # [B2]
+    tau_std2 = (cfg.TAU_E_MUT_STD * s).view(B2, 1)
+    wei_std2 = (cfg.W_EI_MUT_STD * s).view(B2, 1)
+    wie_std2 = (cfg.W_IE_MUT_STD * s).view(B2, 1)
+
+    with torch.no_grad():
+        # ---- G1 交叉：结构组（掩码 + 权重 + 输出偏置）----
+        if has_g1:
+            col_mask = torch.rand(B2, N, device=dev) > 0.5
+            row_mask = col_mask.unsqueeze(1)
+            col_mask_2d = col_mask.unsqueeze(2)
+            same_p1 = row_mask & col_mask_2d
+            same_p2 = (~row_mask) & (~col_mask_2d)
+            coin = torch.rand(B2, N, N, device=dev) > 0.5
+
+            children.W_in = torch.where(col_mask.unsqueeze(2), p1.W_in, p2.W_in)
+            children.M_in = torch.where(col_mask.unsqueeze(2), p1.M_in, p2.M_in)
+            children.W_rec = torch.where(same_p1, p1.W_rec,
+                                torch.where(same_p2, p2.W_rec,
+                                    torch.where(coin, p1.W_rec, p2.W_rec)))
+            children.M_rec = torch.where(same_p1, p1.M_rec,
+                                torch.where(same_p2, p2.M_rec,
+                                    torch.where(coin, p1.M_rec, p2.M_rec)))
+            children.W_out = torch.where(col_mask.unsqueeze(1), p1.W_out, p2.W_out)
+            children.M_out = torch.where(col_mask.unsqueeze(1), p1.M_out, p2.M_out)
+            bmask = torch.rand(B2, cfg.ACTION_DIM, device=dev) > 0.5
+            children.b_out = torch.where(bmask, p1.b_out, p2.b_out)
+
+        # ---- G2 交叉：动力学组 ----
+        if has_g2:
+            col2 = torch.rand(B2, N, device=dev) > 0.5
+            children.tau_e = torch.where(col2, p1.tau_e, p2.tau_e)
+            children.w_ei = torch.where(col2, p1.w_ei, p2.w_ei)
+            children.w_ie = torch.where(col2, p1.w_ie, p2.w_ie)
+
+        # ---- 变异（逐组独立，冻结组跳过；强度逐子代 s 缩放）----
+        if has_g1:
+            pick = torch.randint(0, 3, (B2,), device=dev)
+            topo_gate = torch.rand(B2, device=dev) < topo_mut_prob_i
+            for ai, attr in enumerate(GeneStack.G1_MASKS):
+                sel = (pick == ai) & topo_gate
+                if bool(sel.any().item()):
+                    t = getattr(children, attr)
+                    rate3 = mask_mut_rate_i.view(B2, 1, 1)
+                    flip = torch.rand_like(t) < rate3
+                    setattr(children, attr,
+                            torch.where(sel[:, None, None] & flip, 1.0 - t, t))
+            for attr in GeneStack.G1_WEIGHTS:
+                t = getattr(children, attr)
+                # 按基因张量维度自适应广播 [B2,1,1]/[B2,1]
+                v = lambda x: x.view(B2, *([1] * (t.dim() - 1))).to(t.dtype)
+                noise = torch.randn_like(t) * v(weight_std1)
+                m = (torch.rand_like(t) < v(weight_frac1)).to(t.dtype)
+                setattr(children, attr, t + noise * m)
+
+        if has_g2:
+            children.tau_e = torch.clamp(children.tau_e + torch.randn_like(children.tau_e)
+                                         * tau_std2.to(children.tau_e.dtype),
+                                         cfg.TAU_E_MIN, cfg.TAU_E_MAX)
+            children.w_ei = torch.clamp(children.w_ei + torch.randn_like(children.w_ei)
+                                        * wei_std2.to(children.w_ei.dtype),
+                                        cfg.W_EI_MIN, cfg.W_EI_MAX)
+            children.w_ie = torch.clamp(children.w_ie + torch.randn_like(children.w_ie)
+                                        * wie_std2.to(children.w_ie.dtype),
+                                        cfg.W_IE_MIN, cfg.W_IE_MAX)
+
+    for g in GeneStack.GENES:
+        setattr(new_pop, g, torch.cat([getattr(elites, g).clone(), getattr(children, g)], dim=0))
+    new_pop.dtype = pop.dtype
+    return new_pop
+
+
+# ==========================================
+# 6. 保存 / 加载（断点 + 最优模型）
+# ==========================================
+def load_best_state(path, cfg):
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        data = torch.load(path, map_location='cpu', weights_only=False)
+    except Exception as e:
+        print(f"  警告: 模型 {path} 读取失败 ({e})，已忽略种子")
+        return None
+    saved_cfg = data.get('config', {})
+    if saved_cfg:
+        if (saved_cfg.get('NUM_COLUMNS') != cfg.NUM_COLUMNS or
+                saved_cfg.get('OBS_DIM') != cfg.OBS_DIM or
+                saved_cfg.get('ACTION_DIM') != cfg.ACTION_DIM):
+            print(f"  警告: 模型 {path} 与当前配置不匹配 (N/OBS/ACTION_DIM)，已忽略种子")
+            return None
+    st = data.get('brain')
+    if st is None:
+        return None
+    return st, float(data.get('food', -1.0)), float(data.get('steps', 0.0))
+
+
+def save_best_model(path, st, cfg, food, seen, unseen):
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    torch.save({
+        'brain': st,
+        'food': float(food),
+        'steps': float(seen + unseen),
+        'config': _cfg_dict(cfg),
+        'saved_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+    }, path)
+
+
+def save_history_json(path, history):
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(history, f, ensure_ascii=False)
+
+
+def save_checkpoint7(path, cfg, next_gen, pop, history,
+                     cum_eval_time, cum_evolve_time,
+                     best_state, best_food, best_seen, best_unseen, best_last, best_prox,
+                     best_row=None):
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    payload = {
+        'next_gen': next_gen,
+        'pop': pop.pack(),
+        'history': history,
+        'cum_eval_time': float(cum_eval_time),
+        'cum_evolve_time': float(cum_evolve_time),
+        'best_state': best_state,
+        'best_food': float(best_food),
+        'best_seen': float(best_seen),
+        'best_unseen': float(best_unseen),
+        'best_last': float(best_last),
+        'best_prox': float(best_prox),
+        'best_row': None if best_row is None else np.asarray(best_row),
+        'config': _cfg_dict(cfg),
+        'random_state': random.getstate(),
+        'torch_rng_state': torch.get_rng_state(),
+        'saved_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    tmp = path + '.tmp'
+    torch.save(payload, tmp)
+    os.replace(tmp, path)
+    print(f"  [Checkpoint] 断点已保存 -> {path} (next_gen={next_gen})")
+
+
+def load_checkpoint7(path, cfg):
+    if not os.path.exists(path):
+        return None
+    try:
+        data = torch.load(path, map_location='cpu', weights_only=False)
+    except Exception:
+        return None
+    saved_cfg = data.get('config', {})
+    if saved_cfg and (saved_cfg.get('NUM_COLUMNS') != cfg.NUM_COLUMNS or
+                      saved_cfg.get('OBS_DIM') != cfg.OBS_DIM or
+                      saved_cfg.get('ACTION_DIM') != cfg.ACTION_DIM):
+        print(f"  警告: 断点 {path} 与当前配置不匹配 (N/OBS/ACTION_DIM)，已忽略")
+        return None
+    return data
+
+
+# ==========================================
+# 7. 主循环
+# ==========================================
+def run_training(cfg):
+    device = _resolve_device(cfg)
+    print(f"[GPU] device = {device}  "
+          f"({'GPU: ' + torch.cuda.get_device_name(0) if device.type == 'cuda' else 'CPU 回退'})")
+    if device.type == 'cuda':
+        mem = torch.cuda.get_device_properties(device).total_memory / 1e9
+        print(f"[GPU] 显存 {mem:.1f} GB, 自动评估批大小 = {_auto_eval_batch(cfg, device)}")
+    if str(getattr(cfg, 'SELECTION_MODE', 'two_stage')) == 'tournament':
+        sizes, s = [], cfg.POP_SIZE
+        while s > cfg.ELITE_SIZE:
+            sizes.append(s)
+            s = max(cfg.ELITE_SIZE, s // 2)
+        slots = sum(sizes) * cfg.TOURN_K
+        if getattr(cfg, 'TOURN_FINAL_PASS', False):
+            slots += cfg.ELITE_SIZE * cfg.TOURN_K
+        print(f"[筛选] 模式=锦标赛 CRN={cfg.USE_CRN} | K={cfg.TOURN_K}/轮 "
+              f"规模 {'→'.join(map(str, sizes + [cfg.ELITE_SIZE]))} | "
+              f"配对={cfg.TOURN_PAIRING} 终轮加赛={bool(cfg.TOURN_FINAL_PASS)} | "
+              f"账面 {slots} 局次/代 | "
+              f"变异 s~{cfg.MUT_SCALE_DIST}(σ={cfg.MUT_SCALE_SIGMA}) "
+              f"clip[{cfg.MUT_SCALE_MIN},{cfg.MUT_SCALE_MAX}]")
+    else:
+        print(f"[筛选] 模式=两阶段 CRN={cfg.USE_CRN} | K1={cfg.STAGE1_EPS} → 保 "
+              f"{cfg.STAGE2_KEEP} → K2={cfg.EVAL_EPISODES} | "
+              f"账面 {cfg.POP_SIZE * cfg.STAGE1_EPS + min(cfg.STAGE2_KEEP, cfg.POP_SIZE) * cfg.EVAL_EPISODES}"
+              f" 局次/代 | "
+              f"变异 s~{cfg.MUT_SCALE_DIST}(σ={cfg.MUT_SCALE_SIGMA}) "
+              f"clip[{cfg.MUT_SCALE_MIN},{cfg.MUT_SCALE_MAX}]")
+    print(f"[适应度 v{cfg.FITNESS_VERSION}] food + {cfg.FOOD_EFF_WEIGHT}·eff + "
+          f"{cfg.TURN_EFF_W}·min(SL/TL,{cfg.TURN_EFF_CAP:.0f})/{cfg.TURN_EFF_CAP:.0f}"
+          f"（{cfg.TURN_EFF_MODE} 口径）| 弱连接屏蔽 "
+          f"W_rec×{1 - cfg.WEAK_MASK_FRAC:.0%}")
+    t_program = time.perf_counter()
+
+    start_gen = 0
+    pop = GeneStack(cfg, device=device)
+    history = {'gen': [], 'best_food': [], 'avg_food': [], 'best_seen': [],
+               'best_unseen': [], 'elite_food': [], 'best_fit': [], 'best_turneff': []}
+    cum_eval_time = 0.0
+    cum_evolve_time = 0.0
+    best_state = None
+    best_food = -1.0
+    best_seen = 0.0
+    best_unseen = 0.0
+    best_last = 0.0
+    best_prox = 0.0
+    best_row = np.zeros(12)
+    best_row[1] = 99999.0
+    latest_gen_best_state = None
+    latest_gen_best_food = -1.0
+    latest_gen_best_seen = 0.0
+    latest_gen_best_unseen = 0.0
+
+    if cfg.AUTO_RESUME:
+        ck = load_checkpoint7(cfg.CHECKPOINT_PATH, cfg)
+        if ck is not None:
+            start_gen = int(ck['next_gen'])
+            pop.unpack(ck['pop'])
+            history = ck.get('history', history)
+            for k in ('elite_food', 'best_fit', 'best_turneff'):
+                history.setdefault(k, [])
+            # 跨版本续训（如 7g 断点）时补齐新键长度，避免曲线错位
+            for k in ('elite_food', 'best_fit', 'best_turneff'):
+                pad = len(history.get('gen', [])) - len(history[k])
+                if pad > 0:
+                    history[k].extend([None] * pad)
+            cum_eval_time = float(ck.get('cum_eval_time', 0.0))
+            cum_evolve_time = float(ck.get('cum_evolve_time', 0.0))
+            best_state = ck.get('best_state')
+            best_food = float(ck.get('best_food', -1.0))
+            best_seen = float(ck.get('best_seen', 0.0))
+            best_unseen = float(ck.get('best_unseen', 0.0))
+            best_last = float(ck.get('best_last', 0.0))
+            best_prox = float(ck.get('best_prox', 0.0))
+            best_row = np.zeros(12)
+            best_row[1] = 99999.0
+            if 'best_row' in ck:
+                best_row = np.asarray(ck['best_row'], dtype=np.float64)
+            if best_state is not None:
+                random.setstate(ck['random_state'])
+                torch.set_rng_state(ck['torch_rng_state'])
+            # 适应度版本变化 → 旧 best 行跨公式不可比，重置追踪（history 保留）
+            ck_ver = int(ck.get('config', {}).get('FITNESS_VERSION', 1))
+            if ck_ver != int(getattr(cfg, 'FITNESS_VERSION', 1)):
+                best_row = np.zeros(12)
+                best_row[1] = 99999.0
+                best_state = None
+                best_food = -1.0
+                print(f"  [适应度版本变更 v{ck_ver} -> v{cfg.FITNESS_VERSION}] "
+                      f"best 追踪已重置（种群与历史保留，从本代重新记录）")
+            print(f"=== 检测到断点 [{cfg.CHECKPOINT_PATH}] ===")
+            print(f"  已完成 {start_gen} 代 -> 从第 {start_gen} 代接续 | "
+                  f"历史最优: Food={best_food:.1f} | 已耗时 {cum_eval_time + cum_evolve_time:.1f}s")
+
+    if pop.M_in is None:
+        t0 = time.perf_counter()
+        print("初始化种群（GPU 随机初始化）...")
+        pop.random_init()
+        if cfg.SEED_FROM_BEST and cfg.SEED_MODEL_PATH:
+            seed = load_best_state(cfg.SEED_MODEL_PATH, cfg)
+            if seed is not None:
+                st, s_food, s_steps = seed
+                pop.set_individual_from_state(0, st)
+                print(f"  [Seed] 已注入 {cfg.SEED_MODEL_PATH} 作为种群种子 "
+                      f"(Food={s_food:.1f}, Steps={s_steps:.1f})")
+            else:
+                print("  [Seed] 种子模型不可用，全新随机初始化")
+        else:
+            print("  全新随机初始化（SEED_FROM_BEST=False）")
+        print(f"  初始化完成 ({time.perf_counter() - t0:.1f}s)")
+        save_checkpoint7(cfg.CHECKPOINT_PATH, cfg, 0, pop, history,
+                         cum_eval_time, cum_evolve_time,
+                         best_state, best_food, best_seen, best_unseen, best_last, best_prox,
+                         best_row=best_row)
+
+    try:
+        for gen in range(start_gen, cfg.GENERATIONS):
+            t_eval = time.perf_counter()
+            metrics, order = evaluate_population_gpu(pop, cfg, gen=gen)
+            eval_time = time.perf_counter() - t_eval
+            cum_eval_time += eval_time
+
+            mn = metrics.numpy()
+            key_fn = _make_key_fn(cfg)
+            best_idx = order[0]
+            b_food, b_seen, b_unseen, b_last, b_prox = (
+                float(mn[best_idx][0]), float(mn[best_idx][1]),
+                float(mn[best_idx][2]), float(mn[best_idx][3]), float(mn[best_idx][4]))
+            b_turn = (float(mn[best_idx][8]) + float(mn[best_idx][9])) / max(b_seen + b_unseen, 1.0)
+            b_te = (min(b_last / max(float(mn[best_idx][10]), 1.0), cfg.TURN_EFF_CAP)
+                    if (mn[best_idx][10] > 0 and b_food > 0) else
+                    (cfg.TURN_EFF_CAP if b_food > 0 else 0.0))
+            b_fit = key_fn(mn[best_idx])
+            b_fit = b_fit if np.isscalar(b_fit) else b_fit[0]
+            avg_food = float(np.mean(mn[:, 0]))
+            elite_food = float(np.mean([mn[i][0] for i in order[:cfg.ELITE_SIZE]]))
+
+            history['gen'].append(gen)
+            history['best_food'].append(b_food)
+            history['avg_food'].append(avg_food)
+            history['best_seen'].append(b_seen)
+            history['best_unseen'].append(b_unseen)
+            history['elite_food'].append(elite_food)
+            history['best_fit'].append(float(b_fit))
+            history['best_turneff'].append(float(b_te))
+
+            if key_fn(mn[best_idx]) > key_fn(best_row):
+                best_food = b_food
+                best_seen = b_seen
+                best_unseen = b_unseen
+                best_last = b_last
+                best_prox = b_prox
+                best_row = mn[best_idx].copy()
+                best_state = pop.individual_state(best_idx, use_half=False)
+
+            latest_gen_best_state = pop.individual_state(best_idx, use_half=False)
+            latest_gen_best_food = b_food
+            latest_gen_best_seen = b_seen
+            latest_gen_best_unseen = b_unseen
+
+            if gen < cfg.GENERATIONS - 1:
+                t_ev = time.perf_counter()
+                pop = evolve_topology_gpu(pop, metrics, cfg, gen=gen, order=order)
+                evolve_time = time.perf_counter() - t_ev
+                cum_evolve_time += evolve_time
+            else:
+                evolve_time = 0.0
+
+            if (gen + 1) % cfg.PRINT_HISTORY_EVERY == 0:
+                avg_wall = float(np.mean(mn[:, 5]))
+                avg_self = float(np.mean(mn[:, 6]))
+                avg_starve = float(np.mean(mn[:, 7]))
+                print(f"Gen {gen + 1}/{cfg.GENERATIONS} | "
+                      f"BestFood: {b_food:.2f} | BestFit: {b_fit:.3f} | "
+                      f"BestTurnEff: {b_te:.2f} | BestTurn: {b_turn:.3f} | "
+                      f"BestReach: {float(mn[best_idx][11]):.3f} | "
+                      f"AvgFood: {avg_food:.2f} | EliteFood: {elite_food:.2f} | "
+                      f"Die(W/S/St): {avg_wall:.2f}/{avg_self:.2f}/{avg_starve:.2f} | "
+                      f"eval {eval_time:.1f}s / evolve {evolve_time:.1f}s")
+
+            if (gen + 1) % cfg.CHECKPOINT_INTERVAL == 0:
+                save_checkpoint7(cfg.CHECKPOINT_PATH, cfg, gen + 1, pop, history,
+                                 cum_eval_time, cum_evolve_time,
+                                 best_state, best_food, best_seen, best_unseen,
+                                 best_last, best_prox, best_row=best_row)
+                save_history_json(cfg.HISTORY_JSON_PATH, history)
+
+    except KeyboardInterrupt:
+        nxt = gen if 'gen' in dir() else start_gen
+        print("\n训练被中断 (Ctrl+C)，正在保存断点...")
+        save_checkpoint7(cfg.CHECKPOINT_PATH, cfg, nxt, pop, history,
+                         cum_eval_time, cum_evolve_time,
+                         best_state, best_food, best_seen, best_unseen,
+                         best_last, best_prox, best_row=best_row)
+        save_history_json(cfg.HISTORY_JSON_PATH, history)
+        print(f"断点已保存: {cfg.CHECKPOINT_PATH} (下次从第 {nxt} 代接续)")
+        sys.exit(0)
+
+    t_delta = time.perf_counter() - t_program
+    print(f"\nTotal runtime: {t_delta:.1f}s "
+          f"(eval {cum_eval_time:.1f}s / evolve {cum_evolve_time:.1f}s)")
+
+    if best_state is None:
+        best_idx = 0
+        best_state = pop.individual_state(best_idx, use_half=False)
+    save_best_model(cfg.BEST_MODEL_PATH, best_state, cfg, best_food, best_seen, best_unseen)
+    print(f"\n最优模型已保存: {cfg.BEST_MODEL_PATH} "
+          f"(Food={best_food:.2f}, Seen={best_seen:.1f}, Unseen={best_unseen:.1f})")
+
+    if latest_gen_best_state is not None:
+        save_best_model(cfg.LATEST_GEN_BEST_MODEL_PATH, latest_gen_best_state, cfg,
+                        latest_gen_best_food, latest_gen_best_seen, latest_gen_best_unseen)
+        print(f"最新一代最优模型已保存: {cfg.LATEST_GEN_BEST_MODEL_PATH} "
+              f"(Food={latest_gen_best_food:.2f})")
+
+    # 断点保留（7g 教训：完成后删除断点导致跨 run 只能种子注入=准重启）
+    save_checkpoint7(cfg.CHECKPOINT_PATH, cfg, cfg.GENERATIONS, pop, history,
+                     cum_eval_time, cum_evolve_time,
+                     best_state, best_food, best_seen, best_unseen,
+                     best_last, best_prox, best_row=best_row)
+    save_history_json(cfg.HISTORY_JSON_PATH, history)
+    print(f"训练完成，断点已保留: {cfg.CHECKPOINT_PATH} "
+          f"(next_gen={cfg.GENERATIONS}，续训需提高 --gens)")
+
+    # ---- 历史曲线 ----
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+        ax1.plot(history['gen'], history['best_food'], label='Best Food',
+                 color='red', marker='o', markersize=3)
+        ax1.plot(history['gen'], history['avg_food'], label='Avg Food',
+                 color='blue', alpha=0.6)
+        if history.get('elite_food'):
+            ax1.plot(history['gen'], history['elite_food'], label='Elite Food',
+                     color='green', alpha=0.8)
+        ax1.set_title("Evolution Progress — Food Count")
+        ax1.set_xlabel("Generation")
+        ax1.set_ylabel("Food Eaten")
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        ax2.plot(history['gen'], history['best_seen'], label='Best Seen',
+                 color='green', marker='s', markersize=3)
+        ax2.plot(history['gen'], history['best_unseen'], label='Best Unseen',
+                 color='purple', marker='^', markersize=3)
+        ax2.set_title("Best Seen/Unseen Steps")
+        ax2.set_xlabel("Generation")
+        ax2.set_ylabel("Steps")
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        plt.tight_layout()
+        hist_path = cfg.CHECKPOINT_PATH.replace('_checkpoint', '_history').replace('.pth', '.png')
+        fig.savefig(hist_path, dpi=100)
+        plt.close(fig)
+        print(f"历史曲线已保存: {hist_path}")
+    except Exception as e:
+        print(f"(matplotlib 曲线跳过: {e})")
+
+    print(f"\n--- Best Brain Summary ---")
+    st = best_state
+    print(f"Input connections active:   {st['M_in'].sum().item()}/{pop.N * pop.O}")
+    print(f"Internal connections active: {st['M_rec'].sum().item()}/{pop.N * pop.N}")
+    print(f"Output connections active:   {st['M_out'].sum().item()}/{pop.A * pop.N}")
+    print(f"tau_e range: [{st['tau_e_init'].min().item():.3f}, {st['tau_e_init'].max().item():.3f}]")
+
+
+def play_best(cfg, max_steps=300):
+    """加载最优模型并在 GPU 上播放一局（打印 ASCII 棋盘）。"""
+    res = load_best_state(cfg.BEST_MODEL_PATH, cfg)
+    if res is None:
+        print("无最优模型可播放")
+        return
+    st, food, steps = res
+    dev = _resolve_device(cfg)
+    pop = GeneStack(cfg, B=1, device=dev)
+    pop.random_init()
+    pop.set_individual_from_state(0, st)
+    pop.refresh_eff()
+    if getattr(cfg, 'USE_FP16', True):
+        pop.fp16()
+        pop.refresh_eff()
+    env = BatchedSnakeEnv(cfg, 1, dev)
+    E = torch.zeros(1, pop.N, dtype=pop.dtype, device=dev)
+    I = torch.zeros(1, pop.N, dtype=pop.dtype, device=dev)
+    stt = torch.zeros(1, pop.N, dtype=pop.dtype, device=dev)
+    press = torch.zeros(1, dtype=torch.float32, device=dev)
+    G = cfg.GRID_SIZE
+
+    def render():
+        g = [['.' for _ in range(G)] for _ in range(G)]
+        h = env.head[0].tolist()
+        b = env.body[0, :env.body_len[0]].tolist()
+        f = env.food[0].tolist()
+        g[f[0]][f[1]] = '*'
+        for i, (r, c) in enumerate(b):
+            ch = 'H' if i == 0 else '#'
+            if 0 <= r < G and 0 <= c < G:
+                g[r][c] = ch
+        print('  ' + '\n  '.join(''.join(row) for row in g))
+
+    ep_food = 0
+    for s in range(max_steps):
+        obs = env.obs().to(pop.dtype)
+        act, E, I, stt = deliberate_batch(pop, obs, E, I, stt, press, cfg)
+        press = update_fatigue(press, act, decay=float(cfg.FATIGUE_TURN_DECAY))
+        env.step(act)
+        if env.ate[0]:
+            ep_food += 1
+        if s % 10 == 0:
+            print(f"\n--- Step {s} (score {ep_food}) ---")
+            render()
+        if env.all_done():
+            print(f"\n--- 死亡 @ step {s} ---")
+            render()
+            break
+    print(f"\nPlay done: Food={ep_food}, Steps={s + 1}")
+
+
+# ==========================================
+# 8. 自检（CRN 确定性 / 变异分布 / 适应度公式）
+# ==========================================
+def selfcheck(cfg):
+    print("=== 自检 1：适应度公式（v2：ratio W=3 CAP=4）===")
+    m = np.zeros(12)
+    m[0], m[3], m[10] = 10.0, 100.0, 10.0   # food=10, SL=100, TL=10 → te=10→cap
+    f1 = _fitness_econ(m, cfg)
+    expect1 = 10 + 0.3 * 0.1 + 3.0 * 1.0
+    m[10] = 0.0                              # 全程直行 → te=cap
+    f2 = _fitness_econ(m, cfg)
+    m2 = np.zeros(12)                        # 高密度：SL=100, TL=50 → te=2 → 1.5 分
+    m2[0], m2[3], m2[10] = 10.0, 100.0, 50.0
+    f3 = _fitness_econ(m2, cfg)
+    expect3 = 10 + 0.3 * 0.1 + 3.0 * 0.5
+    m[0] = 0.0                               # 零食 → 0
+    f4 = _fitness_econ(m, cfg)
+    print(f"  有序(te≥cap): {f1:.4f} (期望 {expect1:.4f}) "
+          f"{'OK' if abs(f1 - expect1) < 1e-9 else 'FAIL'}")
+    print(f"  全直行: {f2:.4f} (应= {expect1:.4f}) "
+          f"{'OK' if abs(f2 - expect1) < 1e-9 else 'FAIL'}")
+    print(f"  高密度(te=2): {f3:.4f} (期望 {expect3:.4f}) "
+          f"{'OK' if abs(f3 - expect3) < 1e-9 else 'FAIL'}")
+    print(f"  food=0: {f4:.4f} (期望 0) {'OK' if f4 == 0.0 else 'FAIL'}")
+
+    print("=== 自检 2：变异强度分布 ===")
+    dev = _resolve_device(cfg)
+    s = sample_mut_scale(cfg, 200000, dev).cpu()
+    print(f"  中位数 {s.median():.3f} | 分位 5% {s.quantile(0.05):.3f} / "
+          f"95% {s.quantile(0.95):.3f} | P(s>2)={float((s > 2).float().mean()):.4f} "
+          f"| P(s<0.5)={float((s < 0.5).float().mean()):.4f} "
+          f"| max {s.max():.3f}")
+
+    print("=== 自检 3：弱连接屏蔽生效校验 ===")
+    torch.manual_seed(11)
+    p3 = GeneStack(cfg, B=16, device=dev)
+    p3.random_init()
+    frac = float(cfg.WEAK_MASK_FRAC)
+    w_before = p3.W_rec.clone()
+    p3c = p3[torch.arange(16, device=dev)]           # 拷贝（模拟评估路径）
+    before = (p3c.W_rec * p3c.M_rec != 0).sum().item()
+    apply_weak_mask(p3c, cfg)
+    after = (p3c.W_rec * p3c.M_rec != 0).sum().item()
+    genes_intact = torch.equal(p3.W_rec, w_before)
+    print(f"  活跃 W_rec 连接 {before} → {after}（屏蔽 {1 - after / before:.1%}，"
+          f"目标 {frac:.0%}）| 原基因栈未动: {genes_intact} "
+          f"{'OK' if genes_intact and abs((1 - after / before) - frac) < 0.02 else 'FAIL'}")
+
+    print("=== 自检 4：CRN 确定性（同代同库两跑逐位一致，小种群，含屏蔽）===")
+    sc = Config()                     # 独立小配置：自检不该跑全尺寸种群
+    sc.POP_SIZE, sc.NUM_COLUMNS = 64, 32
+    sc.ELITE_SIZE, sc.STAGE1_EPS, sc.EVAL_EPISODES, sc.STAGE2_KEEP = 16, 2, 3, 32
+    sc.MAX_STEPS, sc.EVAL_BATCH, sc.USE_FP16 = 400, 64, cfg.USE_FP16
+    sc.DEVICE = cfg.DEVICE
+    sc.WEAK_MASK_FRAC = cfg.WEAK_MASK_FRAC
+    torch.manual_seed(7)
+    pop = GeneStack(sc, device=_resolve_device(sc))
+    pop.random_init()
+    pop.fp16()
+    m_a, order_a = evaluate_population_gpu(pop, sc, gen=0)
+    m_b, order_b = evaluate_population_gpu(pop, sc, gen=0)
+    same = torch.equal(m_a, m_b) and order_a == order_b
+    print(f"  metrics 逐位一致: {torch.equal(m_a, m_b)} | order 一致: {order_a == order_b} "
+          f"{'OK' if same else 'FAIL'}")
+    m_c, _ = evaluate_population_gpu(pop, sc, gen=1)
+    diff = float((m_a[:, 0] - m_c[:, 0]).abs().max())
+    print(f"  换代换库后指标改变（应>0）: max|Δfood|={diff:.3f} "
+          f"{'OK' if diff > 0 else 'FAIL'}")
+
+    print("=== 自检 5：锦标赛选择逻辑（纯逻辑 monkeypatch 评估，无 GPU 依赖）===")
+
+    class _FakePop:
+        """携带全局序号的假种群：__getitem__ 保序，每个体适应度可预知。"""
+
+        def __init__(self, n, ids=None):
+            self.P = n
+            self.device = torch.device('cpu')
+            self.ids = list(range(n)) if ids is None else list(ids)
+
+        def __getitem__(self, idx):
+            return _FakePop(len(idx), [self.ids[i] for i in idx])
+
+    calls = []
+
+    def fake_eval(p, c, banks):
+        calls.append((p.P, len(banks)))
+        m = torch.zeros(p.P, 12)
+        m[:, 0] = torch.tensor([float(g) for g in p.ids])   # fitness≈food=全局序号
+        return m
+
+    def tie_eval(p, c, banks):
+        calls.append((p.P, len(banks)))
+        return torch.zeros(p.P, 12)                          # 全并列：考配对洗牌
+
+    def tcfg(seed=20260827):
+        c = Config()
+        c.POP_SIZE, c.ELITE_SIZE, c.TOURN_K = 16, 4, 2
+        c.SELECTION_MODE, c.TOURN_PAIRING = 'tournament', 'random'
+        c.USE_CRN, c.USE_FP16 = False, False
+        c.CRN_SEED = seed
+        return c
+
+    # (a) 随机配对：结构不变量（真最强者任何配对下必夺冠；淘汰赛允许同 pair
+    #     强强相遇的爆冷，全序无保证）+ 轮次账目
+    calls.clear()
+    m5, o5 = evaluate_tournament(_FakePop(16), tcfg(), gen=0, _eval_fn=fake_eval)
+    ok_a = (o5[0] == 15 and len(set(o5)) == 16 and 15 in list(o5[:4]))
+    ok_slots = calls == [(16, 2), (8, 2)]
+    print(f"  随机配对 16→8→4 结构: {'OK' if ok_a else 'FAIL'} | 账目 {calls} "
+          f"{'OK' if ok_slots else 'FAIL'}")
+
+    # (a2) rank 变体：无爆冷 → 断言完整全局序（淘汰名单按累计分降序分块）
+    c_rank2 = tcfg()
+    c_rank2.TOURN_PAIRING = 'rank'
+    _, or2 = evaluate_tournament(_FakePop(16), c_rank2, gen=0, _eval_fn=fake_eval)
+    ok_a2 = (list(or2[:4]) == [15, 14, 13, 12] and list(or2[4:8]) == [11, 10, 9, 8]
+             and list(or2[8:]) == list(range(7, -1, -1)))
+    print(f"  rank 16→8→4 全序: {'OK' if ok_a2 else 'FAIL'}")
+
+    # (b) 奇数轮空 15→7→4（keep_n=15//2=7：轮空超额裁尾；第二轮 7→4 轮空补齐）
+    calls.clear()
+    _, o6 = evaluate_tournament(_FakePop(15), tcfg(), gen=0, _eval_fn=fake_eval)
+    ok_b = (o6[0] == 14 and len(set(o6)) == 15 and calls == [(15, 2), (7, 2)])
+    print(f"  奇数轮空 15→7→4: {'OK' if ok_b else 'FAIL'} | 账目 {calls}")
+
+    # (c) 确定性：同 seed 两跑逐位一致；全并列时换 seed 应改变配对结果
+    _, oa = evaluate_tournament(_FakePop(16), tcfg(seed=1), gen=0, _eval_fn=fake_eval)
+    _, ob = evaluate_tournament(_FakePop(16), tcfg(seed=1), gen=0, _eval_fn=fake_eval)
+    calls.clear()
+    _, ot1 = evaluate_tournament(_FakePop(16), tcfg(seed=1), gen=0, _eval_fn=tie_eval)
+    _, ot2 = evaluate_tournament(_FakePop(16), tcfg(seed=2), gen=0, _eval_fn=tie_eval)
+    ok_c = oa == ob
+    ok_d = ot1 != ot2
+    print(f"  同seed逐位一致: {'OK' if ok_c else 'FAIL'} | "
+          f"全并列时换seed配对改变: {'OK' if ok_d else 'FAIL'}")
+
+    # (d) rank 消融变体 + 精英终轮加赛账目
+    c_rank = tcfg()
+    c_rank.TOURN_PAIRING = 'rank'
+    c_rank.TOURN_FINAL_PASS = True
+    calls.clear()
+    _, orank = evaluate_tournament(_FakePop(16), c_rank, gen=0, _eval_fn=fake_eval)
+    ok_e = list(orank[:4]) == [15, 14, 13, 12] and calls == [(16, 2), (8, 2), (4, 2)]
+    print(f"  rank+终轮加赛: {'OK' if ok_e else 'FAIL'} | 账目 {calls}")
+
+    ok_all5 = all([ok_a, ok_slots, ok_a2, ok_b, ok_c, ok_d, ok_e])
+    print(f"  === 自检 5 {'全部 OK' if ok_all5 else '存在 FAIL'} ===")
+    print("=== 自检完成 ===")
+
+
+# ==========================================
+# 9. 入口
+# ==========================================
+def make_smoke_config():
+    cfg = Config()
+    cfg.POP_SIZE = 16
+    cfg.NUM_COLUMNS = 24
+    cfg.OBS_DIM = 32
+    cfg.ACTION_DIM = 3
+    cfg.GENERATIONS = 3
+    cfg.ELITE_SIZE = 6
+    cfg.STAGE1_EPS = 1
+    cfg.EVAL_EPISODES = 2
+    cfg.STAGE2_KEEP = 8
+    cfg.MAX_STEPS = 60
+    cfg.FRAME_RATE = 2
+    cfg.CHECKPOINT_INTERVAL = 2
+    cfg.CHECKPOINT_PATH = 'test11_smoke_checkpoint.pth'
+    cfg.BEST_MODEL_PATH = 'test11_smoke_best.pth'
+    cfg.LATEST_GEN_BEST_MODEL_PATH = 'test11_smoke_latest_gen_best.pth'
+    cfg.HISTORY_JSON_PATH = 'test11_smoke_history.json'
+    cfg.SEED_FROM_BEST = False
+    cfg.EVAL_BATCH = 16
+    cfg.PRINT_HISTORY_EVERY = 1
+    return cfg
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description='test11 — 锦标赛淘汰制筛选实验（独立系列；two_stage 臂=现行快速二阶段）')
+    ap.add_argument('--smoke', action='store_true', help='小规模快速自检')
+    ap.add_argument('--selfcheck', action='store_true',
+                    help='只跑自检（适应度/变异分布/CRN 确定性），不训练')
+    ap.add_argument('--gens', type=int, default=None)
+    ap.add_argument('--pop', type=int, default=None)
+    ap.add_argument('--columns', type=int, default=None)
+    ap.add_argument('--episodes', type=int, default=None, help='阶段2 局数 K2')
+    ap.add_argument('--max-steps', type=int, default=None)
+    ap.add_argument('--device', type=str, default=None)
+    ap.add_argument('--fit-mode', type=str, default=None, choices=['econ', 'tuple'])
+    ap.add_argument('--eff-weight', type=float, default=None,
+                    help='吃子效率权重（默认 0.3）')
+    ap.add_argument('--turn-eff-w', type=float, default=None,
+                    help='转弯效率权重（默认 3.0，解法器基准校准）')
+    ap.add_argument('--turn-eff-cap', type=float, default=None,
+                    help='转弯效率饱和上限（默认 4，密度 0.25 饱和）')
+    ap.add_argument('--turn-eff-mode', type=str, default=None,
+                    choices=['ratio', 'tpf'],
+                    help='转弯效率口径：ratio=SL/TL（默认）| tpf=每食物转弯数（备选）')
+    ap.add_argument('--weak-mask-frac', type=float, default=None,
+                    help='评估期 W_rec 弱连接屏蔽比例（默认 0.20，0=关）')
+    ap.add_argument('--stage1-eps', type=int, default=None,
+                    help='阶段1 局数 K1（默认 3）')
+    ap.add_argument('--stage2-eps', type=int, default=None,
+                    help='阶段2 局数 K2（默认 10）')
+    ap.add_argument('--stage2-keep', type=int, default=None,
+                    help='阶段1 后幸存数（默认 410，须 ≥ 精英数）')
+    ap.add_argument('--selection', type=str, default=None,
+                    choices=['two_stage', 'tournament'],
+                    help='筛选器：two_stage=现行两阶段（默认）| tournament=锦标赛淘汰制')
+    ap.add_argument('--tourn-k', type=int, default=None,
+                    help='锦标赛每轮局数 K（默认 3）')
+    ap.add_argument('--tourn-pairing', type=str, default=None,
+                    choices=['random', 'rank'],
+                    help='锦标赛配对：random=随机淘汰赛（默认）| rank=排序砍半（消融）')
+    ap.add_argument('--tourn-final-pass', action='store_true',
+                    help='锦标赛精英终轮加赛 K 局（默认关）')
+    ap.add_argument('--seed', type=int, default=None,
+                    help='初始化/进化全局种子（默认 INIT_SEED=42；0=不固定）')
+    ap.add_argument('--tag', type=str, default=None,
+                    help='产物文件名标签（如 two_stage / tourn_k3），多臂互不覆盖')
+    ap.add_argument('--no-crn', action='store_true', help='关闭公共随机数（回退随机库）')
+    ap.add_argument('--crn-seed', type=int, default=None)
+    ap.add_argument('--mut-sigma', type=float, default=None,
+                    help='变异强度分布弥散（lognormal σ_ln，默认 0.4）')
+    ap.add_argument('--mut-dist', type=str, default=None, choices=['lognormal', 'normal'])
+    ap.add_argument('--turn-gain', type=float, default=None,
+                    help='转向疲劳增益（默认 0=彻底关闭）')
+    ap.add_argument('--turn-decay', type=float, default=None)
+    ap.add_argument('--starve-slope', type=float, default=None)
+    ap.add_argument('--eval-batch', type=int, default=None)
+    ap.add_argument('--seed-model', type=str, default=None,
+                    help='指定种子模型路径（单个体注入随机种群，覆盖全种群续训）')
+    ap.add_argument('--play', action='store_true')
+    args = ap.parse_args()
+
+    if args.smoke:
+        cfg = make_smoke_config()
+    else:
+        cfg = Config()
+    if args.gens:
+        cfg.GENERATIONS = args.gens
+    if args.pop:
+        cfg.POP_SIZE = args.pop
+    if args.columns:
+        cfg.NUM_COLUMNS = args.columns
+        cfg.INIT_DENSITY = min(0.15, 40.0 / cfg.NUM_COLUMNS)
+    if args.episodes:
+        cfg.EVAL_EPISODES = args.episodes
+    if args.max_steps:
+        cfg.MAX_STEPS = args.max_steps
+    if args.device:
+        cfg.DEVICE = args.device
+    if args.fit_mode:
+        cfg.FIT_MODE = args.fit_mode
+    if args.selection:
+        cfg.SELECTION_MODE = args.selection
+    if args.tourn_k is not None:
+        cfg.TOURN_K = args.tourn_k
+    if args.tourn_pairing:
+        cfg.TOURN_PAIRING = args.tourn_pairing
+    if args.tourn_final_pass:
+        cfg.TOURN_FINAL_PASS = True
+    if args.seed is not None:
+        cfg.INIT_SEED = args.seed
+    if not args.smoke:
+        # 产物命名：test11_{fit 臂}_{tag}_*（两臂/多实验互不覆盖）
+        arm = 'econ' if cfg.FIT_MODE == 'econ' else 'tup'
+        parts = [p for p in (arm, args.tag) if p]
+        suffix = ('_' + '_'.join(parts)) if parts else ''
+        cfg.CHECKPOINT_PATH = f'test11{suffix}_checkpoint.pth'
+        cfg.BEST_MODEL_PATH = f'test11{suffix}_best_model.pth'
+        cfg.LATEST_GEN_BEST_MODEL_PATH = f'test11{suffix}_latest_gen_best.pth'
+        cfg.HISTORY_JSON_PATH = f'test11{suffix}_history.json'
+    _seed = int(getattr(cfg, 'INIT_SEED', 0) or 0)
+    if _seed > 0:
+        # A/B 同起点关键：固定初始化与进化全局 RNG（续训时断点 RNG 覆盖之）
+        random.seed(_seed)
+        torch.manual_seed(_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(_seed)
+
+    if cfg.STAGE2_KEEP < cfg.ELITE_SIZE:
+        sys.exit(f'[配置错误] STAGE2_KEEP({cfg.STAGE2_KEEP}) 须 ≥ ELITE_SIZE({cfg.ELITE_SIZE})')
+    if cfg.SELECTION_MODE == 'tournament' and cfg.ELITE_SIZE >= cfg.POP_SIZE:
+        sys.exit(f'[配置错误] 锦标赛要求 ELITE_SIZE({cfg.ELITE_SIZE}) < POP_SIZE({cfg.POP_SIZE})')
+    if args.eff_weight is not None:
+        cfg.FOOD_EFF_WEIGHT = args.eff_weight
+    if args.turn_eff_w is not None:
+        cfg.TURN_EFF_W = args.turn_eff_w
+    if args.turn_eff_cap is not None:
+        cfg.TURN_EFF_CAP = args.turn_eff_cap
+    if args.turn_eff_mode:
+        cfg.TURN_EFF_MODE = args.turn_eff_mode
+    if args.weak_mask_frac is not None:
+        cfg.WEAK_MASK_FRAC = args.weak_mask_frac
+    if args.stage1_eps is not None:
+        cfg.STAGE1_EPS = args.stage1_eps
+    if args.stage2_eps is not None:
+        cfg.EVAL_EPISODES = args.stage2_eps
+    if args.stage2_keep is not None:
+        cfg.STAGE2_KEEP = args.stage2_keep
+    if args.no_crn:
+        cfg.USE_CRN = False
+    if args.crn_seed is not None:
+        cfg.CRN_SEED = args.crn_seed
+    if args.mut_sigma is not None:
+        cfg.MUT_SCALE_SIGMA = args.mut_sigma
+    if args.mut_dist:
+        cfg.MUT_SCALE_DIST = args.mut_dist
+    if args.turn_gain is not None:
+        cfg.FATIGUE_TURN_GAIN = args.turn_gain
+    if args.turn_decay is not None:
+        cfg.FATIGUE_TURN_DECAY = args.turn_decay
+    if args.starve_slope is not None:
+        cfg.STARVE_SLOPE = args.starve_slope
+    if args.eval_batch is not None:
+        cfg.EVAL_BATCH = args.eval_batch
+    if args.seed_model:
+        cfg.SEED_FROM_BEST = True
+        cfg.SEED_MODEL_PATH = args.seed_model
+
+    if args.selfcheck:
+        selfcheck(cfg)
+        return
+    if args.play:
+        play_best(cfg)
+        return
+
+    run_training(cfg)
+
+
+if __name__ == '__main__':
+    main()
