@@ -73,18 +73,19 @@ def update_counts(counts, action):
 
 
 def make_zero_states(brain, batch=1):
-    """创建初始零状态（每局/每 env 起点）。"""
+    """创建初始零状态（每局/每 env 起点），设备跟随 brain。"""
     N = brain.N
-    E = torch.zeros(batch, N)
-    I = torch.zeros(batch, N)
-    short = torch.zeros(batch, N)
+    dev = next(brain.parameters()).device
+    E = torch.zeros(batch, N, device=dev)
+    I = torch.zeros(batch, N, device=dev)
+    short = torch.zeros(batch, N, device=dev)
     if brain.train_hormone:
-        he = torch.zeros(batch, N)
-        hi = torch.zeros(batch, N)
+        he = torch.zeros(batch, N, device=dev)
+        hi = torch.zeros(batch, N, device=dev)
     else:
         he = None
         hi = None
-    counts = torch.zeros(batch, 3)
+    counts = torch.zeros(batch, 3, device=dev)
     return E, I, short, he, hi, counts
 
 
@@ -106,6 +107,7 @@ def trainable_parameters(brain, cfg):
 def evaluate(brain, env, cfg, episodes=5):
     """argmax 贪心评估（K=FRAME_RATE 思考）。返回 (avg_food, avg_steps)。"""
     brain.eval()
+    dev = next(brain.parameters()).device
     total_foods = []
     total_steps = []
     with torch.no_grad():
@@ -116,7 +118,7 @@ def evaluate(brain, env, cfg, episodes=5):
             steps = 0
             done = truncated = False
             while not done and not truncated and steps < cfg.MAX_STEPS:
-                obs_t = torch.from_numpy(np.asarray(obs, dtype=np.float32)).unsqueeze(0)
+                obs_t = torch.from_numpy(np.asarray(obs, dtype=np.float32)).unsqueeze(0).to(dev)
                 logits, _, E, I, short, he, hi = forward_ppo_k(
                     brain, obs_t, E, I, short, he, hi, counts)
                 action = int(logits.squeeze(0).argmax().item())
@@ -134,6 +136,7 @@ def evaluate(brain, env, cfg, episodes=5):
 def evaluate_k1_probe(brain, env, cfg, episodes=5):
     """K=1 单次思考评估（诊断用）。"""
     brain.eval()
+    dev = next(brain.parameters()).device
     total_foods = []
     with torch.no_grad():
         for _ in range(episodes):
@@ -143,7 +146,7 @@ def evaluate_k1_probe(brain, env, cfg, episodes=5):
             steps = 0
             done = truncated = False
             while not done and not truncated and steps < cfg.MAX_STEPS:
-                obs_t = torch.from_numpy(np.asarray(obs, dtype=np.float32)).unsqueeze(0)
+                obs_t = torch.from_numpy(np.asarray(obs, dtype=np.float32)).unsqueeze(0).to(dev)
                 logits, _, E, I, short, he, hi = forward_ppo_k(
                     brain, obs_t, E, I, short, he, hi, counts, K=1, decay=1.0)
                 action = int(logits.squeeze(0).argmax().item())
@@ -184,13 +187,22 @@ def compute_gae(rew_buf, val_buf, mask_buf, last_val, cfg):
 
 def ppo_update(brain, optimizer, cfg,
                obs_buf, act_buf, logp_buf, adv_buf, ret_buf,
-               E0_buf, I0_buf, short0_buf, he0_buf, hi0_buf, counts0_buf):
-    """PPO clip 更新（K=FRAME_RATE 思考重放）。返回 (policy, value, entropy) 均值。"""
+               E0_buf, I0_buf, short0_buf, he0_buf, hi0_buf, counts0_buf,
+               anchor_brain=None, policy_active=True):
+    """PPO clip 更新（K=FRAME_RATE 思考重放）。返回 (policy, value, entropy) 均值。
+
+    anchor_brain 非空时（cfg.KL_ANCHOR_BETA>0），对策略施加相对种子策略的
+    KL(new‖anchor) 惩罚——强先验微调场景下抑制优势归一化噪声导致的策略侵蚀。
+    policy_active=False 时只训 critic（配合 DETACH_VALUE_TRUNK，策略零梯度）。
+    """
     T, B, obs_dim = obs_buf.shape
     N = brain.N
     n = T * B
     K = max(1, int(getattr(cfg, 'FRAME_RATE', 1)))
     decay = float(getattr(cfg, 'INPUT_DECAY', 0.9))
+    kl_beta = float(getattr(cfg, 'KL_ANCHOR_BETA', 0.0))
+    use_anchor = anchor_brain is not None and kl_beta > 0
+    temp = float(getattr(cfg, 'SAMPLE_TEMP', 1.0))
 
     obs_flat = obs_buf.reshape(n, obs_dim)
     act_flat = act_buf.reshape(n)
@@ -205,7 +217,8 @@ def ppo_update(brain, optimizer, cfg,
     he0_flat = he0_buf.reshape(n, N) if he0_buf is not None else None
     hi0_flat = hi0_buf.reshape(n, N) if hi0_buf is not None else None
 
-    adv_flat = (adv_flat - adv_flat.mean()) / (adv_flat.std() + 1e-8)
+    if bool(getattr(cfg, 'ADV_NORMALIZE', True)):
+        adv_flat = (adv_flat - adv_flat.mean()) / (adv_flat.std() + 1e-8)
 
     idx = np.arange(n)
     mb_size = int(cfg.MINIBATCH_SIZE)
@@ -215,7 +228,7 @@ def ppo_update(brain, optimizer, cfg,
         random.shuffle(idx)
         for s in range(0, n, mb_size):
             mb = idx[s:s + mb_size]
-            mb_t = torch.from_numpy(mb)
+            mb_t = torch.from_numpy(mb).to(obs_flat.device)
 
             logits, val, *_ = forward_ppo_k(
                 brain, obs_flat[mb_t],
@@ -224,7 +237,7 @@ def ppo_update(brain, optimizer, cfg,
                 hi0_flat[mb_t] if hi0_flat is not None else None,
                 counts0_flat[mb_t], K=K, decay=decay)
 
-            dist = Categorical(logits=logits)
+            dist = Categorical(logits=logits / temp)
             new_logp = dist.log_prob(act_flat[mb_t])
             entropy = dist.entropy().mean()
 
@@ -235,7 +248,22 @@ def ppo_update(brain, optimizer, cfg,
             policy_loss = -torch.min(surr1, surr2).mean()
             value_loss = 0.5 * (val - ret_flat[mb_t]).pow(2).mean()
 
-            loss = policy_loss + cfg.VALUE_COEF * value_loss - cfg.ENTROPY_COEF * entropy
+            if policy_active:
+                loss = policy_loss + cfg.VALUE_COEF * value_loss - cfg.ENTROPY_COEF * entropy
+            else:
+                loss = cfg.VALUE_COEF * value_loss
+
+            if use_anchor and policy_active:
+                with torch.no_grad():
+                    a_logits, *_ = forward_ppo_k(
+                        anchor_brain, obs_flat[mb_t],
+                        E0_flat[mb_t], I0_flat[mb_t], short0_flat[mb_t],
+                        he0_flat[mb_t] if he0_flat is not None else None,
+                        hi0_flat[mb_t] if hi0_flat is not None else None,
+                        counts0_flat[mb_t], K=K, decay=decay)
+                kl = torch.distributions.kl.kl_divergence(
+                    dist, Categorical(logits=a_logits / temp))
+                loss = loss + kl_beta * kl.mean()
 
             optimizer.zero_grad()
             loss.backward()
@@ -261,25 +289,32 @@ def ppo_update(brain, optimizer, cfg,
 
 
 def _make_buffers(brain, cfg, T, B):
-    obs_buf = torch.zeros(T, B, cfg.OBS_DIM, dtype=torch.float32)
-    act_buf = torch.zeros(T, B, dtype=torch.long)
-    logp_buf = torch.zeros(T, B, dtype=torch.float32)
-    val_buf = torch.zeros(T, B, dtype=torch.float32)
-    rew_buf = torch.zeros(T, B, dtype=torch.float32)
-    mask_buf = torch.zeros(T, B, dtype=torch.float32)
+    dev = next(brain.parameters()).device
+    obs_buf = torch.zeros(T, B, cfg.OBS_DIM, dtype=torch.float32, device=dev)
+    act_buf = torch.zeros(T, B, dtype=torch.long, device=dev)
+    logp_buf = torch.zeros(T, B, dtype=torch.float32, device=dev)
+    val_buf = torch.zeros(T, B, dtype=torch.float32, device=dev)
+    rew_buf = torch.zeros(T, B, dtype=torch.float32, device=dev)
+    mask_buf = torch.zeros(T, B, dtype=torch.float32, device=dev)
     N = brain.N
-    E0_buf = torch.zeros(T, B, N, dtype=torch.float32)
-    I0_buf = torch.zeros(T, B, N, dtype=torch.float32)
-    short0_buf = torch.zeros(T, B, N, dtype=torch.float32)
-    counts0_buf = torch.zeros(T, B, 3, dtype=torch.float32)
+    E0_buf = torch.zeros(T, B, N, dtype=torch.float32, device=dev)
+    I0_buf = torch.zeros(T, B, N, dtype=torch.float32, device=dev)
+    short0_buf = torch.zeros(T, B, N, dtype=torch.float32, device=dev)
+    counts0_buf = torch.zeros(T, B, 3, dtype=torch.float32, device=dev)
     if brain.train_hormone:
-        he0_buf = torch.zeros(T, B, N, dtype=torch.float32)
-        hi0_buf = torch.zeros(T, B, N, dtype=torch.float32)
+        he0_buf = torch.zeros(T, B, N, dtype=torch.float32, device=dev)
+        hi0_buf = torch.zeros(T, B, N, dtype=torch.float32, device=dev)
     else:
         he0_buf = None
         hi0_buf = None
     return (obs_buf, act_buf, logp_buf, val_buf, rew_buf, mask_buf,
             E0_buf, I0_buf, short0_buf, he0_buf, hi0_buf, counts0_buf)
+
+
+def _make_env(cfg):
+    """按 cfg.ENV_CLS（默认 SnakeEnv）创建环境，保持 test6 原语义兼容。"""
+    env_cls = getattr(cfg, 'ENV_CLS', None) or SnakeEnv
+    return env_cls(grid_size=cfg.GRID_SIZE, max_steps=cfg.MAX_STEPS, cfg=cfg)
 
 
 def run_training(cfg, visualize=False):
@@ -323,7 +358,7 @@ def run_training(cfg, visualize=False):
             if seed_result is not None:
                 seed, seed_food, seed_steps = seed_result
                 brain = seed
-                eval_env_seed = SnakeEnv(grid_size=cfg.GRID_SIZE, max_steps=cfg.MAX_STEPS)
+                eval_env_seed = _make_env(cfg)
                 base_food, base_steps = evaluate(brain, eval_env_seed, cfg,
                                                  episodes=max(cfg.EVAL_EPISODES, 5))
                 best_food = base_food
@@ -340,6 +375,24 @@ def run_training(cfg, visualize=False):
 
     assert brain is not None, "brain 初始化失败"
 
+    dev = torch.device(getattr(cfg, 'PPO_DEVICE', 'cpu'))
+    brain = brain.to(dev)
+    sees_food_fn = getattr(cfg, 'SEES_FOOD_FN', None) or _obs_sees_food
+    temp = float(getattr(cfg, 'SAMPLE_TEMP', 1.0))   # rollout 采样温度（与 replay 同温）
+
+    # KL 锚定：以训练起点（种子）策略为锚，抑制强先验微调的策略侵蚀。
+    # 断点续训时优先恢复已保存的锚（保持锚定到种子而非漂移后的策略）。
+    anchor_brain = None
+    if float(getattr(cfg, 'KL_ANCHOR_BETA', 0.0)) > 0:
+        anchor_state = ckpt.get('anchor_state') if ckpt is not None else None
+        if anchor_state is None:
+            anchor_state = io.save_brain_state(brain, use_half=False)
+        anchor_brain = io.load_brain_state(anchor_state, cfg)
+        for p in anchor_brain.parameters():
+            p.requires_grad_(False)
+        anchor_brain.eval()
+        print(f"  [KL锚定] beta={cfg.KL_ANCHOR_BETA}，锚定策略已冻结")
+
     if optimizer is None:
         optimizer = torch.optim.Adam(trainable_parameters(brain, cfg), lr=cfg.LR)
         if ckpt is not None and ckpt.get('optimizer') is not None:
@@ -351,7 +404,7 @@ def run_training(cfg, visualize=False):
     B = cfg.N_ENVS
     N = brain.N
     T = cfg.ROLLOUT_LEN
-    envs = [SnakeEnv(grid_size=cfg.GRID_SIZE, max_steps=cfg.MAX_STEPS, cfg=cfg) for _ in range(B)]
+    envs = [_make_env(cfg) for _ in range(B)]
     obs_stack = np.stack([e.reset() for e in envs], axis=0).astype(np.float32)
     E, I, short, he, hi, counts = make_zero_states(brain, B)
 
@@ -370,7 +423,7 @@ def run_training(cfg, visualize=False):
             ep_infos = []
 
             for t in range(T):
-                obs_t = torch.from_numpy(obs_stack)
+                obs_t = torch.from_numpy(obs_stack).to(dev)
                 E0_buf[t] = E
                 I0_buf[t] = I
                 short0_buf[t] = short
@@ -383,7 +436,7 @@ def run_training(cfg, visualize=False):
                     logits, val, E, I, short, he, hi = forward_ppo_k(
                         brain, obs_t, E, I, short, he, hi, counts)
 
-                dist = Categorical(logits=logits)
+                dist = Categorical(logits=logits / temp)
                 act = dist.sample()
                 logp = dist.log_prob(act)
 
@@ -392,12 +445,12 @@ def run_training(cfg, visualize=False):
                 logp_buf[t] = logp.detach()
                 val_buf[t] = val.detach()
 
-                seen_mask = _obs_sees_food(obs_stack)
+                seen_mask = sees_food_fn(obs_stack)
                 step_rew = np.where(seen_mask, cfg.SEEN_STEP_REWARD, cfg.UNSEEN_STEP_REWARD)
 
                 counts = update_counts(counts, act)
 
-                act_np = act.numpy()
+                act_np = act.cpu().numpy()
                 next_obs = np.zeros_like(obs_stack)
                 for i in range(B):
                     a = int(act_np[i])
@@ -435,7 +488,7 @@ def run_training(cfg, visualize=False):
                 obs_stack = next_obs
 
             with torch.no_grad():
-                obs_t = torch.from_numpy(obs_stack)
+                obs_t = torch.from_numpy(obs_stack).to(dev)
                 _, last_val, _, _, _, _, _ = forward_ppo_k(
                     brain, obs_t, E, I, short, he, hi, counts)
 
@@ -449,7 +502,9 @@ def run_training(cfg, visualize=False):
             p_loss, v_loss, ent = ppo_update(
                 brain, optimizer, cfg,
                 obs_buf, act_buf, logp_buf, adv_buf, ret_buf,
-                E0_buf, I0_buf, short0_buf, he0_buf, hi0_buf, counts0_buf)
+                E0_buf, I0_buf, short0_buf, he0_buf, hi0_buf, counts0_buf,
+                anchor_brain=anchor_brain,
+                policy_active=(it >= int(getattr(cfg, 'POLICY_WARMUP_ITERS', 0))))
 
             mean_rew = float(np.mean([e[0] for e in ep_infos])) if ep_infos else 0.0
             mean_len = float(np.mean([e[1] for e in ep_infos])) if ep_infos else 0.0
@@ -467,8 +522,13 @@ def run_training(cfg, visualize=False):
                   f"{iter_time:.1f}s", end="")
 
             if (it + 1) % cfg.EVAL_INTERVAL == 0:
-                eval_env = SnakeEnv(grid_size=cfg.GRID_SIZE, max_steps=cfg.MAX_STEPS)
-                eval_food, eval_steps = evaluate(brain, eval_env, cfg, episodes=cfg.EVAL_EPISODES)
+                eval_fn = getattr(cfg, 'EVAL_FN', None)
+                if eval_fn is not None:
+                    eval_food, eval_steps = eval_fn(brain, cfg)
+                else:
+                    eval_env = _make_env(cfg)
+                    eval_food, eval_steps = evaluate(brain, eval_env, cfg,
+                                                     episodes=cfg.EVAL_EPISODES)
                 history['eval_food'].append(eval_food)
                 history['eval_iter'].append(it)
                 if eval_food > best_food:
@@ -482,12 +542,14 @@ def run_training(cfg, visualize=False):
 
             if (it + 1) % cfg.CHECKPOINT_INTERVAL == 0:
                 _save_ppo_checkpoint(cfg, it + 1, brain, optimizer,
-                                     history, best_brain, best_food, best_steps)
+                                     history, best_brain, best_food, best_steps,
+                                     anchor_brain=anchor_brain)
 
     except KeyboardInterrupt:
         print("\n训练被中断 (Ctrl+C)，正在保存断点以供下次自动接续...")
         _save_ppo_checkpoint(cfg, cur_iter, brain, optimizer,
-                             history, best_brain, best_food, best_steps)
+                             history, best_brain, best_food, best_steps,
+                             anchor_brain=anchor_brain)
         sys.exit(0)
 
     print(f"\nTotal runtime: {time.perf_counter() - t_program:.1f}s")
@@ -495,9 +557,13 @@ def run_training(cfg, visualize=False):
     if best_brain is None:
         best_brain = brain
     if best_food < 0:
-        eval_env = SnakeEnv(grid_size=cfg.GRID_SIZE, max_steps=cfg.MAX_STEPS)
-        best_food, best_steps = evaluate(best_brain, eval_env, cfg,
-                                         episodes=max(cfg.EVAL_EPISODES, 5))
+        eval_fn = getattr(cfg, 'EVAL_FN', None)
+        if eval_fn is not None:
+            best_food, best_steps = eval_fn(best_brain, cfg)
+        else:
+            eval_env = _make_env(cfg)
+            best_food, best_steps = evaluate(best_brain, eval_env, cfg,
+                                             episodes=max(cfg.EVAL_EPISODES, 5))
     io.save_best_model(cfg.BEST_MODEL_PATH, best_brain, cfg, best_food, best_steps)
     print(f"最优模型已保存: {cfg.BEST_MODEL_PATH} (Food={best_food:.1f}, Steps={best_steps:.1f})")
 
@@ -516,7 +582,7 @@ def run_training(cfg, visualize=False):
 
 
 def _save_ppo_checkpoint(cfg, next_iter, brain, optimizer, history,
-                         best_brain, best_food, best_steps):
+                         best_brain, best_food, best_steps, anchor_brain=None):
     parent = os.path.dirname(os.path.abspath(cfg.CHECKPOINT_PATH))
     if parent:
         os.makedirs(parent, exist_ok=True)
@@ -528,6 +594,8 @@ def _save_ppo_checkpoint(cfg, next_iter, brain, optimizer, history,
         'best_brain': io.save_brain_state(best_brain, use_half=False) if best_brain is not None else None,
         'best_food': float(best_food),
         'best_steps': float(best_steps),
+        'anchor_state': (io.save_brain_state(anchor_brain, use_half=False)
+                         if anchor_brain is not None else None),
         'config': io.config_dict(cfg),
         'random_state': random.getstate(),
         'torch_rng_state': torch.get_rng_state(),

@@ -20,42 +20,42 @@
 
   /* ===== 顶栏 ===== */
   header {
-    display: flex; align-items: center; gap: 14px;
-    padding: 7px 16px;
+    display: flex; align-items: center; gap: 10px;
+    padding: 5px 12px;
     background: linear-gradient(180deg, #1a2130, #141a24);
     border-bottom: 1px solid var(--border); flex-wrap: wrap; flex: none;
   }
-  header h1 { font-size: 16px; font-weight: 600; letter-spacing: .5px; white-space: nowrap; }
-  header h1 small { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px; }
+  header h1 { font-size: 14px; font-weight: 600; letter-spacing: .5px; white-space: nowrap; }
+  header h1 small { color: var(--muted); font-weight: 400; font-size: 11px; margin-left: 6px; }
   .chip {
     background: var(--panel2); border: 1px solid var(--border);
-    border-radius: 6px; padding: 3px 9px; font-size: 12px; white-space: nowrap;
+    border-radius: 6px; padding: 2px 7px; font-size: 11px; white-space: nowrap;
   }
   .chip b { color: #7ee2ff; }
-  .controls { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+  .controls { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-wrap: wrap; }
   .controls select, .controls button {
     background: var(--panel2); color: var(--text);
     border: 1px solid var(--border); border-radius: 6px;
-    padding: 5px 11px; font-size: 12px; cursor: pointer;
+    padding: 4px 9px; font-size: 11px; cursor: pointer;
   }
   .controls button:hover { border-color: var(--accent); }
   .controls button.primary { background: #1f6feb; border-color: #1f6feb; }
   .controls button.pressed { background: #e3b341; border-color: #e3b341; color: #111; }
-  .controls label { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 6px; }
-  input[type=range] { width: 100px; accent-color: var(--accent); }
-  .stats { display: flex; gap: 8px; }
+  .controls label { color: var(--muted); font-size: 11px; display: flex; align-items: center; gap: 5px; }
+  input[type=range] { width: 90px; accent-color: var(--accent); }
+  .stats { display: flex; gap: 6px; }
   .stat {
-    text-align: center; min-width: 54px; background: var(--panel2);
-    border: 1px solid var(--border); border-radius: 8px; padding: 2px 7px;
+    text-align: center; min-width: 46px; background: var(--panel2);
+    border: 1px solid var(--border); border-radius: 8px; padding: 2px 5px;
   }
-  .stat .v { font-size: 17px; font-weight: 700; color: #7ee2ff; line-height: 1.2; }
+  .stat .v { font-size: 15px; font-weight: 700; color: #7ee2ff; line-height: 1.2; }
   .stat .l { font-size: 10px; color: var(--muted); }
 
   /* ===== 主体：平铺栅格 ===== */
   main {
     flex: 1; display: grid;
     grid-template-columns: repeat(12, 1fr);
-    grid-template-rows: 0.9fr 1.25fr 1.35fr;
+    grid-template-rows: 1.6fr 1.1fr 0.85fr;
     gap: 8px; padding: 8px; min-height: 0;
   }
   .card {
@@ -74,8 +74,8 @@
   #heat-card > .card-body { display: flex; flex-direction: column; }
 
   /* 各卡片栅格占位 */
-  #game-card { grid-column: span 3; }
-  #input-card { grid-column: span 3; }
+  #game-card { grid-column: span 2; }
+  #input-card { grid-column: span 4; }
   #output-card { grid-column: span 2; }
   #topo-card { grid-column: span 4; }
   #fc-card { grid-column: span 3; }
@@ -95,36 +95,44 @@
   }
   .ana-ctl button:hover { color: var(--text); border-color: var(--accent); }
   .ana-ctl input[type=range] { width: 54px; accent-color: var(--accent); }
+  .ana-ctl input[type=number] {
+    width: 56px; background: #0b0f16; color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 1px 4px; font-size: 10px; font-family: inherit;
+  }
+  .ana-ctl input[type=number]:focus { border-color: var(--accent); outline: none; }
   .ana-ctl .sub-val { min-width: 26px; text-align: right; font-variant-numeric: tabular-nums; }
   canvas.ana { position: absolute; inset: 0; }
   #fcCanvas, #rasterCanvas { image-rendering: pixelated; }
 
-  #game-wrap { display: flex; align-items: center; justify-content: center; padding: 5px; }
-  #gameCanvas { width: 300px; height: 300px; image-rendering: pixelated; }
+  #game-wrap { display: flex; align-items: center; justify-content: center; padding: 5px; height: 100%; }
+  /* 游戏盘尺寸由 JS 按卡片可用空间自适应（正方形），不再固定 300px */
+  #gameCanvas { image-rendering: pixelated; }
 
-  /* 输入面板 */
-  #input-body { padding: 6px 10px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+  /* 输入面板（双列紧凑布局，24/32 维一屏看全） */
+  #input-body { padding: 4px 8px; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; }
+  .io-cols { display: grid; grid-template-columns: 1fr 1fr; column-gap: 10px; align-content: start; }
   .io-group .g-label {
-    font-size: 11px; color: var(--muted); margin-bottom: 2px;
+    font-size: 10px; color: var(--muted); margin-bottom: 0; line-height: 1.25;
     display: flex; justify-content: space-between;
   }
-  .bar-row { display: flex; align-items: center; gap: 5px; margin-bottom: 1px; }
-  .bar-row .b-label { width: 62px; font-size: 10px; color: var(--muted); text-align: right; flex: none; }
-  .bar-track { flex: 1; height: 8px; background: #0b0f16; border-radius: 3px; position: relative; }
+  .bar-row { display: flex; align-items: center; gap: 4px; margin-bottom: 0; }
+  .bar-row .b-label { width: 50px; font-size: 9px; color: var(--muted); text-align: right; flex: none; }
+  .bar-track { flex: 1; height: 6px; background: #0b0f16; border-radius: 3px; position: relative; }
   .bar-fill { position: absolute; inset: 0; border-radius: 3px; }
-  .bar-row .b-val { width: 36px; font-size: 10px; color: #9fb3cc; text-align: right; flex: none; font-variant-numeric: tabular-nums; }
+  .bar-row .b-val { width: 30px; font-size: 9px; color: #9fb3cc; text-align: right; flex: none; font-variant-numeric: tabular-nums; }
 
-  /* 输出面板 */
-  #output-body { padding: 8px 10px; overflow-y: auto; }
-  .act-row { margin-bottom: 8px; }
-  .act-label { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 2px; }
-  .act-label .tag { padding: 0 6px; border-radius: 4px; font-size: 10px; }
-  .act-bar-track { height: 18px; background: #0b0f16; border-radius: 4px; position: relative; border: 1px solid transparent; }
+  /* 输出面板（紧凑） */
+  #output-body { padding: 6px 10px; overflow-y: auto; }
+  .act-row { margin-bottom: 6px; }
+  .act-label { display: flex; justify-content: space-between; font-size: 10px; margin-bottom: 2px; }
+  .act-label .tag { padding: 0 5px; border-radius: 4px; font-size: 9px; }
+  .act-bar-track { height: 14px; background: #0b0f16; border-radius: 4px; position: relative; border: 1px solid transparent; }
   .act-bar-track.active { border-color: #ffd33d; box-shadow: 0 0 6px #ffd33d55; }
   .act-fill { position: absolute; top: 0; bottom: 0; border-radius: 3px; }
-  .fatigue-row { font-size: 11px; color: var(--muted); margin-top: 8px; line-height: 1.7; }
+  .fatigue-row { font-size: 10px; color: var(--muted); margin-top: 6px; line-height: 1.6; }
   .fatigue-row b { color: #ffa657; }
-  .legend-note { font-size: 10px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
+  .legend-note { font-size: 9px; color: var(--muted); margin-top: 4px; line-height: 1.4; }
 
   /* 热力图 tab 子选项 */
   #heat-tabs {
@@ -217,23 +225,23 @@
       <div id="input-body">
         <div class="io-group">
           <div class="g-label"><span>食物方向</span><span id="g-fdir" style="color:#3fb950">--</span></div>
-          <div id="bars-fdir"></div>
+          <div id="bars-fdir" class="io-cols"></div>
         </div>
         <div class="io-group">
           <div class="g-label"><span>食物距离</span><span id="g-fdist" style="color:#f0883e">--</span></div>
-          <div id="bars-fdist"></div>
+          <div id="bars-fdist" class="io-cols"></div>
         </div>
         <div class="io-group">
           <div class="g-label"><span>射线视野 5×(路径, 食物)</span></div>
-          <div id="bars-ray"></div>
+          <div id="bars-ray" class="io-cols"></div>
         </div>
         <div class="io-group">
           <div class="g-label"><span>自体感知 8 桶</span></div>
-          <div id="bars-self"></div>
+          <div id="bars-self" class="io-cols"></div>
         </div>
         <div class="io-group">
           <div class="g-label"><span>蛇尾局部坐标</span></div>
-          <div id="bars-tail"></div>
+          <div id="bars-tail" class="io-cols"></div>
         </div>
       </div>
     </div>
@@ -267,8 +275,10 @@
     </div>
 
     <div class="card" id="spring-card">
-      <div class="card-title">⑧ 3D 弹簧链接图 <span class="sub">稳态布局 · 端点约束 · 拖拽旋转</span>
+      <div class="card-title">⑧ 3D 弹簧链接图 <span class="sub">纯弹簧稳态 · 拖拽旋转</span>
         <div class="ana-ctl">
+          <label>原长<input type="number" id="springL0Input" min="0.05" max="50" step="0.05" value="1"></label>
+          <label>刚度<input type="number" id="springKInput" min="0.01" max="100" step="0.05" value="1"></label>
           <button id="springPhysBtn">🔀 重排</button>
           <button id="springResetBtn">重置</button>
         </div>

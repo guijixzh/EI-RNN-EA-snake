@@ -120,3 +120,36 @@ einbrain/
 | `run_training_gpu(cfg)` | GPU 全向量化进化 | test7 |
 
 > 注意：`test5d_best_model.pth` 带有**已训练的激素权重**，仅 `EIBrainRegion`（CPU/PPO 路径）能利用；GPU 路径为无激素架构，其与单脑前向的等价性仅在激素权重为 0（如 test7 模型）时严格成立（已由单元测试验证，最大误差 0.0）。
+
+---
+
+## 4. 后续演进（2026-08 下旬）：test7 系列与 test9–test13
+
+上文 §1 主线在 test7/test8 之后继续展开：test7 演化为一整个系列
+（test7a→7b→7c→…→7h），并派生 test10/11/12/13 四条支线与 test9 分析线。
+逐主题详细日志（继承关系/目的/更新/结果与结论）见 `docs/`：
+
+```
+test7 (GPU 全并行) ─→ test7a (32维投影观测) ─→ test7b ★效率适应度（活跃冠军线, 留守根目录）
+                                                ├→ test7c→7d→7e→7f→7g→7h (疲劳/计价/观测几何/CRN 筛选迭代, 已归档)
+                                                │     └→ 外围 A/B 全线失败 → 观测重写路线
+                                                ├→ test12 ★ego 观测 + 适应度 v7 乘法式（当前主线, 留守根目录）
+                                                └→ test13 (冠军脑剪枝固化+PPO 微调, 判定不可行)
+test9  (链接影响/剪枝分析, docs/test9_experiment_log.md)
+test10_lunar (LunarLander 二度移植, test7b 模板, 云端长跑未归档)
+test11 (锦标赛筛选 vs 两阶段, 判定保留两阶段)
+```
+
+| 主题 | 日志 | 一句话状态 |
+|---|---|---|
+| test7 系列（7→7h + 外围 A/B） | `docs/test7_series_experiment_log.md` | 方法论定型（CRN 两阶段筛选/弱连接屏蔽/类正态变异），7b 为最高分冠军线 |
+| test9 | `docs/test9_experiment_log.md` | 链接影响与剪枝分析 |
+| test10_lunar | `docs/test10_lunar_experiment_log.md` | 通道定标+失明 bug 修复后交云端，无结题结论 |
+| test11 | `docs/test11_experiment_log.md` | Phase 0 门判定 STOP，锦标赛归档 |
+| test12 | `docs/test12_experiment_log.md` | 活跃主线：ego 观测有效、适应度演进至 v7 乘法式 |
+| test13 | `docs/test13_ppo_experiment_log.md` | 判定不可行；KL 锚定/快照隔离两条工程结论沉淀进 einbrain |
+
+归档布局（2026-09-02 整理）：test1..test8 与各分析脚本平铺于 `experiments/`；
+test7 系列、test10、test11、test13 分别归档于 `experiments/{test7_series,
+test10_lunar,test11,test13_ppo}/`；活跃线 test7b 与 test12 的脚本/模型留守
+仓库根目录。

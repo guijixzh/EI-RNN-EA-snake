@@ -26,7 +26,7 @@ import numpy as np
 import torch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_SPEC = importlib.util.spec_from_file_location('t10', os.path.join(ROOT, 'test10_lunar.py'))
+_SPEC = importlib.util.spec_from_file_location('t10', os.path.join(ROOT, 'experiments', 'test10_lunar', 'test10_lunar.py'))
 t10 = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(t10)
 

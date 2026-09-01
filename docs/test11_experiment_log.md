@@ -1,5 +1,11 @@
 # test11 实验日志 —— 锦标赛淘汰制 vs 快速二阶段筛选
 
+> **归档注记（2026-09-02）**：系列已结题（Phase 0 门判定 STOP，随机配对
+> 锦标赛判负，保留 two_stage 为默认）。训练脚本与模型归档于
+> `experiments/test11/`（test11.py、test11_smoke_best.pth）；分析脚本
+> `experiments/test11_selection_fidelity.py`、`experiments/test11_ab_verdict.py`；
+> 数据 `results/test11_selection_fidelity_t7h.{json,png}`。
+
 ## 0. 系列定位（★根本方法改进，不沿用 test7 编号★）
 
 选择/筛选机制属进化框架的**根本方法**层，与 test7 系列（适应度/观测/环境迭代）

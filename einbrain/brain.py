@@ -195,10 +195,13 @@ class EIBrainRegion(nn.Module):
             short_term = torch.zeros_like(E)
 
         # 4. 有效 tau_e / Wei / Wie
+        #    注意：tau 调制用『本步更新后』的短期状态（与 test7 forward_batch 顺序一致），
+        #    用旧值会让 tau 系统性滞后一步，长序列上行为漂移。
         horm_e_eff = horm_e if horm_e is not None else torch.zeros_like(E)
         horm_i_eff = horm_i if horm_i is not None else torch.zeros_like(E)
         effective_tau_e = dynamics.effective_tau_e(
-            self.tau_e_init, short_term, horm_e_eff, horm_i_eff, cfg)
+            self.tau_e_init, short_next if short_next is not None else torch.zeros_like(E),
+            horm_e_eff, horm_i_eff, cfg)
         w_ei_eff = dynamics.clamp_w(self.w_ei, cfg.W_EI_MIN, cfg.W_EI_MAX)
         w_ie_eff = dynamics.clamp_w(self.w_ie, cfg.W_IE_MIN, cfg.W_IE_MAX)
 
@@ -211,7 +214,12 @@ class EIBrainRegion(nn.Module):
         action_logits = action_logits - dynamics.fatigue_penalty(counts, cfg)
 
         # 7. value head（critic）
-        value = torch.matmul(E_new, self.V.unsqueeze(1)).squeeze(1) + self.b_v
+        #    DETACH_VALUE_TRUNK：value 梯度不流回共享主干（W_in/W_rec/W_out）——
+        #    进化收敛的策略表征对扰动极敏感，critic 训练会为拟合回报而扭曲主干、侵蚀策略。
+        if bool(getattr(cfg, 'DETACH_VALUE_TRUNK', False)):
+            value = torch.matmul(E_new.detach(), self.V.unsqueeze(1)).squeeze(1) + self.b_v
+        else:
+            value = torch.matmul(E_new, self.V.unsqueeze(1)).squeeze(1) + self.b_v
 
         return (action_logits, value, E_new.detach(), I_new.detach(),
                 short_next, horm_e_next, horm_i_next)

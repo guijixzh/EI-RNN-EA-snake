@@ -1,74 +1,18 @@
 # ==========================================
-# test12.py —— 基于 test7h 的改版：绝对方位食物编码 + 孤岛惩罚
+# test12.py —— 贪吃蛇神经进化实验（CRN 精确筛选 + 两阶段淘汰 + 类正态变异）
 #
-# 相对 test7h 的两处改动：
-#  1. 食物感知重写（obs[8:16]，保持 32 维，OBS_ENC_VERSION='32ego1'）：
-#     - [8:12] 4 相对方位信号 ×K（前/右/后/左，随头转）：sig=clamp(û·dir,0,1)×K。
-#       食物恰在该方向直线上 → 信号 ≈K；斜 45° → 相邻两方向各 ≈0.707K；
-#       与 7h 扇区同为自体系、同输入量级（对准 ≈K）；
-#     - [12:16] 4 相对方位距离倒数：sig×K/曼哈顿距离。与方位信号联合可精确
-#       恢复食物相对向量（方位+距离双通道）。替换原 8 扇区曼哈顿投影。
-#     编码演进（对照实验定位，experiments/diag_test12_vs_7h.py）：
-#       v1 绝对系+原始 sig → 卡 1.0；v2 绝对系+sig×K → 仍卡 1.0（量级无关）；
-#       v3(本版) 相对系——绝对系要求网络先学会 绝对方位⊗头朝向 绑定，
-#       随机初网络零初始相关、选择无梯度。'abs' 帧保留为 Config 开关。
-#  2. 孤岛惩罚（FITNESS_VERSION 3）：过程中（每次吃食采样点）蛇头可达
-#     空间 < ISLAND_THRESHOLD×(总空间−蛇长) 记该局触发，metrics 列 [13]
-#     min_reach、[14] 局触发率；适应度按触发率线性折减
-#     fit ×= 1−(1−ISLAND_PENALTY)·rate（=局级 ×pen 跨局平均的一阶形式；
-#     v1 的'任一局触发即整体 ×0.1'实测与食物数正相关、反向压选择，已废）。
-#     动机：7h 系行为学结论"主死因=空间挤压自撞"，排除分割空间与进入
-#     孤岛的倾向。复用 reach_ratio 洪泛填充（分母即自由格数）。
-#  3. checkpoint 新增 OBS_ENC_VERSION 校验：7h 旧 checkpoint 观测编码
-#     不同但维度相同，resume-pop/seed-model 时按编码版本拒绝，须用新 run。
-#
-# ==========================================
-# 以下为 test7h 原始说明（CRN 精确筛选 + 两阶段淘汰 + 类正态变异，基于 test7g）
-#
-# v2（解法器基准校准，experiments/solver_reference.py）：
-#  - 适应度转弯效率升为一等力量：W 0.5→3.0、CAP 8→4（ratio 口径 SL/TL）。
-#    依据：同库同食数配对下，有序解法器比 7h/7b 模型高 +1.6 分（> 单食边际
-#    1.25 → 渐进转型可攀爬）；旧参数仅 +0.15 分形同虚设。CAP=4 ⇔ 密度 0.25
-#    饱和 → 长直段折叠拿满 3 分不被压制（7d 乘法计价压折叠的教训不复发）。
-#  - 评估期弱连接屏蔽 W_rec×20%（训练=部署同口径，实测 +1.8 分）。
-#  - FITNESS_VERSION：断点跨版本续训自动重置 best 追踪。
-#  - 重要实验事实：纯哈密顿回路跟随 40/40 全部饿死（均 0.4 食）——饿死钟
-#    （3·len+20）在蛇长<27 时短于回路平均遇食距离 ~50 步，环境规则本身
-#    禁止纯有序策略，早期强制抄近路；有序参考 = 回路+安全捷径（密度 0.30，
-#    te 3.2，每食物 9 步）。
-#
-# test7g 40 平台诊断结论（experiments/diagnose_test7g_plateau.py，40 局实测）：
-#  - 适应度排序无过错：τ(现适应度, food)=0.99、反转 0 例；7b 脑在本适应度下
-#    可得 ~60 分而种群困在 ~40 → 瓶颈在选择噪声与血统，不在公式；
-#  - 选择噪声淹没信号：个体内 10 局 SEM=2.18 vs 精英间 σ=3.34，上代第 1 名
-#    重评 28.7 / 第 5 名 39.6——排序大半凭食物运气；2048×10 局极值统计虚增
-#    best ≈+7 分（"40.9 平台"真实水平 ≈33）；
-#  - avg 自 gen23 冻结 25 代：固定小变异在收敛种群上只能随机游走。
-#
-# 相对 test7g 的改动：
-#  1. 适应度重写（econ）：fitness = food + 0.3·food/steps_last
-#       + TURN_EFF_W·min(steps_last/max(turns_last,1), CAP)/CAP
-#     - reach 项删除（它塑形出"守干净空间饿死"：55% 局饿死于口袋食物旁，
-#       序号>31 段 26-33% 食物对头部不可达仍不吃）；avg_reach 仅保留观测。
-#     - 转弯效率 = 最后一食为止步数/同窗口转弯数（整局口径下末食后直行
-#       游荡会白拿无穷高效率）；CAP=8 饱和，项幅 ≤0.5 分（tie-breaker：
-#       实测 7b 穿行密度 0.88 与平台脑游荡 0.80 几乎相同，转弯项不可能区分
-#       二者，任何 ≥12 分的权重都会把 23 分直线脑排到 50 分 7b 之上）。
-#  2. CRN 公共随机数（种子序列固定）：每代每局预生成食物流 bank（初始朝向/
-#     初始食物/逐次落子候选），全种群全分块共用；代间/阶段间换新种子。
-#     政策为确定性 argmax、环境给定 bank 后完全确定 → 同代个体分数无任何
-#     食物运气差异，排序翻转与 best 极值虚增同时消失。
-#  3. 两阶段淘汰：阶段1 全种群 ×STAGE1_EPS 局（CRN 同库精确可比）→ 保前
-#     STAGE2_KEEP 名；阶段2 幸存者 ×STAGE2_EPS 局新库，按累计 (K1+K2) 局
-#     定精英。默认 2048×3 + 410×10 = -50% 评估量，精英判据 10→13 局。
-#  4. 类正态变异强度：每子代抽 s ~ LogNormal(0, MUT_SIGMA) clip [0.25,4]
-#     （中位数 1=现行强度；P(s>2)≈2.4% → 每代 ~43 个大变异），缩放该子代
-#     全部变异算子（掩码翻转率≤0.5 / 拓扑触发率≤0.5 / 权重扰动比例≤1.0
-#     及各 std）；精英不变异。
-#  5. 疲劳彻底关闭（FATIGUE_TURN_GAIN=0.0，留开关）；单侧转弯判死保持关闭。
-#  6. 训练完成不再删除断点（7g 教训：跨 run 只能种子注入=准重启）；
-#     逐代 history 落盘 JSON。
-# 观测：曼哈顿度量固定（欧氏对角偏置 √2 已验证为错误启发，不再提供回退）。
+# 当前适应度 v7（乘法式，FITNESS_VERSION=7）：
+#   fitness = food × (1 + W_EFF·eff + W_STRAIGHT·straight + W_EDGE·edge_share) × conn
+#   - eff=food/steps_last；straight=1−转弯/步；edge_share=圈层总分16/8/4/2/1÷(16×蛇长)；
+#     conn=蛇身外自由空间连通块数倒数 1/n（单连通=1，块越多折扣越大，严格含尾占用）。
+#   - 乘法意图：习惯/效率因子随食物等比放大。加法 tie-breaker（v6 预算 <1 食）
+#     实测撬不动后期坏行为瓶颈；乘法在 50+ 食段 20% 的习惯折损即 10+ 分。
+#   - 括号内各项∈[0,1]、因子非负 → 括号≥1，fitness ≥ food×conn ≥ 0，无需守卫。
+#   - v7 起食物与习惯不再有字典序保证（设计意图本身，非疏忽）。
+# 其他机制：单侧转弯判死（淘汰单向绕圈形态）；观测 32 维 ego 帧食物方位+距离
+#   （绝对系 v1/v2 失败史见 experiments/diag_test12_vs_7h.py）；CRN 公共随机数
+#   + 两阶段淘汰；断点保留 + OBS_ENC_VERSION 兼容校验。
+# 演进史 v4→v7 与全部实验证据：git log、experiments/、results/。
 # ==========================================
 
 import argparse
@@ -88,8 +32,8 @@ import torch
 # ==========================================
 class Config:
     # --- 进化参数（与 test5d/7 系一致）---
-    POP_SIZE = 2048
-    GENERATIONS = 100
+    POP_SIZE = 2048 #默认2048
+    GENERATIONS = 320
     ELITE_SIZE = 256
     MUT_RATE = 0.05
     TOPOLOGY_MUT_PROB = 0.05
@@ -102,7 +46,7 @@ class Config:
 
     # --- 类正态变异强度（每子代因子 s，缩放其全部变异算子）---
     MUT_SCALE_DIST = 'lognormal'   # 'lognormal' | 'normal'
-    MUT_SCALE_SIGMA = 0.4          # lognormal: σ_ln；normal: s~N(1,σ) clip
+    MUT_SCALE_SIGMA = 0.5          # lognormal: σ_ln；normal: s~N(1,σ) clip
     MUT_SCALE_MIN = 0.25
     MUT_SCALE_MAX = 4.0
 
@@ -122,66 +66,43 @@ class Config:
     ACTION_DIM = 3
     INIT_DENSITY = 0.15
 
-    # --- 适应度模式：'econ'=三项和式（本版主模式）| 'tuple'=元组字典序 ---
-    FIT_MODE = 'econ'
+    # --- 适应度模式与版本 ---
+    FIT_MODE = 'econ'           # 'econ'=v7 乘法式 | 'tuple'=元组字典序（旧）
+    FITNESS_VERSION = 7
 
-    # --- 适应度版本（公式变更时 +1；断点版本不一致则重置 best 追踪）---
-    FITNESS_VERSION = 3
+    # --- 适应度 v7 因子（乘法式）：food×(1+W_EFF·eff+W_STRAIGHT·straight+W_EDGE·edge_share)×conn ---
+    # 括号内各项∈[0,1]、因子非负 → 括号≥1，fitness≥food×conn。
+    # 因子随食物等比放大：高食段习惯折损即大额扣分，可扭转后期坏行为。
+    W_EFF = 1.0                 # 效率因子（eff=food/steps_last）
+                                # 校准：实测 eff≈0.05~0.25（16~4 步/食），因子 4
+                                # 使典型效率差 0.05→0.2 ≈ 0.6 分摆幅，与
+                                # straight/edge 满幅 0.5 同量级（0.3 时项不可见）
+    W_STRAIGHT = 1.5            # 少转弯因子（straight=1−转弯/步）
+    W_EDGE = 0.1                # 边角因子（edge_share=圈层总分/(16×蛇长)）
 
-    # --- 孤岛惩罚（test12）：按各局触发率线性折减 fit×(1−(1−pen)·rate) ---
-    # reach_ratio 分母=自由格数（总空间−蛇长），即"蛇头可达空间 < 30% 自由格"。
-    # 采样点=每次吃食（复用 avg_reach 统计点，零额外洪泛成本）。rate=1（全程
-    # 触发）→ ×pen；rate=0 → 不罚。pen=1.0 关闭。
-    ISLAND_THRESHOLD = 0.3
-    ISLAND_PENALTY = 0.1
+    # --- 观测编码（checkpoint 校验用；改编码/参照系须换新 run）---
+    OBS_ENC_VERSION = '32ego1'  # 相对方位+距离通道；'32proj'=7h 扇区投影（旧）
+    OBS_FOOD_FRAME = 'ego'      # 'ego'=前/右/后/左 | 'abs'=绝对系（实测选择无梯度，勿用于从零训练）
 
-    # --- 观测编码版本（'32ego1'=test12 相对方位+距离通道；'32proj'=test7h 扇区投影）---
-    # checkpoint 校验用：7h 与 12 维度同为 32，仅凭 OBS_DIM 无法区分。
-    # v1('32abs') 绝对系 sig 驱动不足；v2('32abs2') 绝对系 ×K 仍卡 1.0；
-    # 本版改相对系（帧对照实证：绝对系要求网络先学会 绝对方位⊗头朝向 绑定，
-    # 随机初网络零初始相关、选择无梯度）。改 OBS_FOOD_FRAME 须换新 run。
-    OBS_ENC_VERSION = '32ego1'
-
-    # --- 食物方位参照系：'ego'=前/右/后/左（默认，随头转；与 7h 扇区同系）---
-    #   | 'abs'=绝对 E/S/W/N（原始需求，保留开关；实测从零训练选择无梯度）
-    OBS_FOOD_FRAME = 'ego'
-
-    # --- econ：fitness = food + W_e·eff + W_t·min(SL/TL, CAP)/CAP ---
-    FOOD_EFF_WEIGHT = 0.3   # 吃子效率权重（7b 验证量级，防固定回路退化）
-    # 转弯效率（解法器基准实测校准，results/test7h_solver_reference.json）：
-    #   有序解法器 te=SL/TL≈3.2 / 密度 0.30；模型 te≈1.13 / 密度 0.88。
-    #   W=3, CAP=4 → 同食数下解法器比模型高 ~1.6 分 > 单食边际 1.25 分
-    #   → 渐进转型的变异体（少 1 食但路径有序）仍胜出，选择可攀爬；
-    #   旧参数 W=0.5/CAP=8 仅 +0.15 分（形同虚设）。
-    #   CAP=4 ⇔ 密度 0.25（长直段折返）即饱和 → 折叠不受压制；
-    #   后期"多转弯换一食"的损失 ≤0.3 分，不可能阻断吃食。
-    TURN_EFF_W = 3.0        # 转弯效率权重（项幅 ≤3 分）
-    TURN_EFF_CAP = 4.0      # 转弯效率饱和上限（SL/TL ≥ 4 后不再加分）
-    TURN_EFF_MODE = 'ratio'  # 'ratio'=SL/TL | 'tpf'=每食物转弯数（备选口径）
-
-    # --- 评估期弱连接屏蔽（H2，训练=部署同口径；基因不动）---
-    # 实测屏蔽 W_rec 最弱 20% 在同库配对下 +1.8 分（10% 反而 −1.4，
-    # 30% +1.1，40% −0.8）：弱内连接是 ~2 分的内噪损耗。进化评估即用
-    # 屏蔽后的成绩 → 训练产物=部署形态。
-    WEAK_MASK_FRAC = 0.20
-
-    # --- te-配额精英（行为学研究 B5 对策：精英 te≥2 占比 0% = 选择无料可选）---
-    # 每代从全种群按 te=SL/TL（截断 CAP、要求 food>0）取 TE_ELITE 名插入精英
-    # 尾部（顶替适应度排名最末的精英），保证稀有有序变异体进入繁殖池。
-    TE_ELITE = 0                # 0=关（默认）；建议 24-32
-
-    # --- 模仿引导（混沌盆地突破：稠密行为梯度，教师=固定回路单调序解法器）---
-    # fitness += IMITATION_W·(1−mismatch)，mismatch=存活步中与教师动作不一致
-    # 的比例（指标列[12]）。教师逻辑向量化，评估零额外扫描成本。
-    # 行为学依据：B3X 证明策略与身体构型共适应、中途换风格必死 → 模仿须从
-    # 出生塑形；te-配额 28 代证明精英池内重组无法转型 → 需要本稠密梯度。
-    IMITATION_W = 0.0           # 0=关（默认）；建议验证 2.0
-
-    # --- 单侧转弯判死（保持关闭：早期随机个体普遍摇头，判罚干扰初期筛选）---
-    ONE_SIDED_TURN_DEATH = False
+    # --- 单侧转弯判死：只朝一个方向转的蛇评估期判死（淘汰单向绕圈形态）---
+    ONE_SIDED_TURN_DEATH = True
 
     # --- 饿死斜率：steps_wo_food > STARVE_SLOPE*len + 20 ---
-    STARVE_SLOPE = 3.0
+    STARVE_SLOPE = 5.0
+
+    # --- 观测：曼哈顿度量固定 ---
+    OBS_MANHATTAN = True
+    OBS_FOOD_SCALE = 8.0
+    OBS_SELF_SCALE = 8.0
+    OBS_OBSTACLE_SCALE = 8.0
+
+    # --- 单侧转弯判死（test12 默认开启）：只朝一个方向转的蛇判死 ---
+    # 关闭理由（test7d）不再成立：随机初期"摇头"个体两向都转、不受影响；
+    # 而单向绕圈蛇在食物 ~28 后自困回环必死（瓶颈实测），须在评估期淘汰。
+    ONE_SIDED_TURN_DEATH = True
+
+    # --- 饿死斜率：steps_wo_food > STARVE_SLOPE*len + 20 ---
+    STARVE_SLOPE = 5.0
 
     # --- 观测：曼哈顿度量固定（欧氏对角偏置已验证为错误启发）---
     OBS_MANHATTAN = True
@@ -225,9 +146,9 @@ class Config:
     CRN_DRAW = 4096             # 每局预生成落子候选流长度
 
     # --- 两阶段淘汰 ---
-    STAGE1_EPS = 3              # 阶段1 局数 K1（全种群，CRN 同库）
-    STAGE2_KEEP = 410           # 阶段1 后幸存数（须 ≥ ELITE_SIZE）
-    STAGE2_EPS = 10             # 阶段2 局数 K2（新库；累计 K1+K2 定精英）
+    STAGE1_EPS = 4              # 阶段1 局数 K1（全种群，CRN 同库）
+    STAGE2_KEEP = 1024           # 阶段1 后幸存数（须 ≥ ELITE_SIZE）
+    STAGE2_EPS = 12             # 阶段2 局数 K2（新库；累计 K1+K2 定精英）
 
     # --- GPU 并行参数 ---
     DEVICE = 'auto'
@@ -239,15 +160,28 @@ class Config:
     PRINT_HISTORY_EVERY = 1
 
     # --- 断点 / 最优模型 / 种子 ---
-    CHECKPOINT_PATH = 'test7h_econ_checkpoint.pth'
-    BEST_MODEL_PATH = 'test7h_econ_best_model.pth'
-    LATEST_GEN_BEST_MODEL_PATH = 'test7h_econ_latest_gen_best.pth'
-    HISTORY_JSON_PATH = 'test7h_econ_history.json'
+    CHECKPOINT_PATH = 'test12_econ_checkpoint.pth'
+    BEST_MODEL_PATH = 'test12_econ_best_model.pth'
+    LATEST_GEN_BEST_MODEL_PATH = 'test12_econ_latest_gen_best.pth'
+    HISTORY_JSON_PATH = 'test12_econ_history.json'
     AUTO_RESUME = True
     CHECKPOINT_INTERVAL = 10
     SEED_FROM_BEST = False
     SEED_MODEL_PATH = ''
     SEED_MODEL_PATH2 = ''
+
+    # ==========================================
+    # 旧参数归档（当前不参与适应度/默认关闭；保留开关便于回溯）
+    # ==========================================
+    ISLAND_THRESHOLD = 0.1      # 孤岛诊断阈值（metrics 列13/14 仅诊断，曾进适应度已废）
+    WEAK_MASK_FRAC = 0.0        # 评估期弱连接屏蔽（0=关；7h 期 0.2 实测 +1.8 分）
+    FATIGUE_TURN_GAIN = 0.0     # 转向疲劳（彻底关闭，留开关）
+    TURN_EFF_W = 3.0            # te 遥测/te-配额参数（v5 起休眠）
+    TURN_EFF_CAP = 4.0
+    TURN_EFF_MODE = 'ratio'     # 'ratio'=SL/TL | 'tpf'=每食物转弯数
+    TE_ELITE = 0                # te-配额精英（0=关）
+    IMITATION_W = 0.0           # 模仿引导（教师全局输入，行为不可比；0=关）
+    HABIT_W = 0.0               # v6 加法习惯项（已由 v7 乘法式取代）
 
 
 # ==========================================
@@ -277,45 +211,36 @@ def _freeze_active_groups(gen, cfg):
 
 
 def _fitness_econ(m, cfg):
-    """三项和式适应度（food 主导 + 微量吃子效率 + 转弯效率一等力量）：
-    fitness = food + EFF_W·(food/steps_last)
-              + TURN_EFF_W · min(steps_last/turns_last, CAP)/CAP     [ratio 模式]
-              + TURN_EFF_W · max(0, 1 − (turns_last/food)/CAP_TPF)   [tpf 备选]
-    - 转弯效率窗口截断到"最后一食为止"（SL/TL 同窗口，游荡不改变比值）；
-    - W=3/CAP=4 由解法器基准校准（见 Config 注释）：同食数下有序路径
-      比模型高 ~1.6 分 > 单食边际 1.25 → 渐进可攀爬；CAP=4 即密度 0.25
-      饱和 → 长直段折叠拿满，不被压制；
-    - turns_last=0 且 food>0 → 效率取 CAP（全程直行=完美）。
-    m 列：0 food, 1 seen, 2 unseen, 3 steps_last, 10 turns_last
-    test12 追加列：13 min_reach, 14 island_flag（任一采样点 min_reach<
-    ISLAND_THRESHOLD×自由格）→ 适应度 ×ISLAND_PENALTY。
+    """适应度 v7（乘法式，test12）：
+    fitness = food × (1 + W_EFF·eff + W_STRAIGHT·straight + W_EDGE·edge_share) × conn
+    - eff=food/steps_last；straight=1−转弯/步（列17）；edge_share=圈层总分
+      /(16×蛇长)（列18）；conn=连通块数倒数（列16，单连通=1，块越多折扣越大，
+      严格含尾占用）。
+    - 乘法意图：因子随食物等比放大。加法 tie-breaker（v6 预算 <1 食）实测
+      撬不动后期坏行为瓶颈；乘法在 50+ 食段 20% 的习惯折损即 10+ 分。
+    - 括号内各项∈[0,1]、因子非负 → 括号≥1，fitness ≥ food×conn ≥ 0。
+    - 单侧转弯判死保留（评估期淘汰形态，属判死规则非适应度项）。
     """
     if m[1] >= 99999:
         return -1e9
-    food, steps_last, turns_last = m[0], m[3], m[10]
+    # 单侧转弯判死（ONE_SIDED_TURN_DEATH，规则同 test7d/e）：整段评估只朝
+    # 一个方向转（另一方向 0 次、单侧平均 >1 次/局）→ 判死。
+    if getattr(cfg, 'ONE_SIDED_TURN_DEATH', False) and len(m) > 9:
+        a1, a2 = float(m[8]), float(m[9])
+        if (a1 > 1.0 and a2 == 0.0) or (a2 > 1.0 and a1 == 0.0):
+            return -1e9
+    food, steps_last = m[0], m[3]
     if food <= 0:
         return 0.0
     eff = food / max(steps_last, 1.0)
-    cap = float(getattr(cfg, 'TURN_EFF_CAP', 4.0))
-    w = float(getattr(cfg, 'TURN_EFF_W', 3.0))
-    if getattr(cfg, 'TURN_EFF_MODE', 'ratio') == 'tpf':
-        te_pts = max(0.0, 1.0 - (turns_last / food) / 10.0)
-    else:
-        te = cap if turns_last <= 0 else min(steps_last / max(turns_last, 1.0), cap)
-        te_pts = te / cap
-    fit = food + float(getattr(cfg, 'FOOD_EFF_WEIGHT', 0.3)) * eff + w * te_pts
-    iw = float(getattr(cfg, 'IMITATION_W', 0.0))
-    if iw > 0 and len(m) > 12:
-        fit += iw * (1.0 - float(m[12]))       # 模仿项：mismatch 率惩罚
-    # 孤岛惩罚（test12，按局触发率线性折减）：fit ×= (1−(1−pen)·rate)，
-    # rate∈[0,1] 为各局 island 触发比例。等价于"局级 ×pen 后跨局平均"的一阶
-    # 形式，消除 v1 的'13 局任一触发即整体 ×0.1'一票否决——实测该实现惩罚
-    # 与食物数正相关（教师解法器 47.5% 局触发、且触发局 food≈98），选择被
-    # 反向压向'只吃 1 食'。
-    if len(m) > 14:
-        pen = float(getattr(cfg, 'ISLAND_PENALTY', 0.1))
-        fit *= 1.0 - (1.0 - pen) * float(m[14])
-    return fit
+    straight = float(m[17]) if len(m) > 17 else 1.0
+    edge = float(m[18]) if len(m) > 18 else 1.0
+    conn = float(m[16]) if len(m) > 16 else 1.0
+    bracket = (1.0
+               + float(getattr(cfg, 'W_EFF', 0.3)) * eff
+               + float(getattr(cfg, 'W_STRAIGHT', 0.5)) * straight
+               + float(getattr(cfg, 'W_EDGE', 0.5)) * edge)
+    return food * bracket * conn
 
 
 def _fitness_tuple(m, cfg):
@@ -1103,10 +1028,12 @@ def deliberate_batch(pop, obs, E, I, st, press, cfg):
 # ==========================================
 # 4. 种群评估（CRN + 两阶段淘汰）
 # ==========================================
-def reach_ratio(env):
-    """从蛇头可达的自由格占比 [B]（仅观测用，不进适应度）。"""
+def reach_ratio(env, tail_invalid=True):
+    """从蛇头可达的自由格占比 [B]（仅观测/诊断用，不进适应度）。
+    tail_invalid=True（默认）把尾格视为可通行（历史口径）；
+    tail_invalid=False 为严格口径：蛇身含尾格全部算占用（习惯因素2 单连通用）。"""
     B, G, dev = env.B, env.G, env.device
-    occ = env._occupancy_flat(tail_invalid=True).view(B, 1, G, G)
+    occ = env._occupancy_flat(tail_invalid=tail_invalid).view(B, 1, G, G)
     free = occ < 0.5
     reach = torch.zeros(B, 1, G, G, device=dev)
     reach[torch.arange(B, device=dev), 0, env.head[:, 0], env.head[:, 1]] = 1.0
@@ -1119,6 +1046,60 @@ def reach_ratio(env):
     reach_cnt = (reach > 0).float().sum(dim=(1, 2, 3))
     return torch.where(free_cnt > 0, reach_cnt / free_cnt.clamp(min=1.0),
                        torch.ones_like(reach_cnt))
+
+
+def habit_edge_score(env):
+    """习惯因素1（占据边角）单步总分 [B]：格子评分制，按所在圈层计分——
+    最外圈每格 16 分，向内每圈减半（10×10 五圈 = 16/8/4/2/1），
+    对蛇身占据格求和。总分随蛇长增长；配额用其归一化版（见列 18）。"""
+    B, G, dev = env.B, env.G, env.device
+    valid = torch.arange(env.MAXLEN, device=dev)[None, :] < env.body_len[:, None]
+    layer = torch.minimum(torch.minimum(env.body[:, :, 0], env.body[:, :, 1]),
+                          torch.minimum(G - 1 - env.body[:, :, 0],
+                                        G - 1 - env.body[:, :, 1]))
+    score = 16.0 / (2.0 ** layer.float())                    # 16/8/4/2/1
+    return ((score * valid.float()).sum(dim=1))
+
+
+def habit_edge_share(env):
+    """习惯因素1 的蛇长归一化版 [B]∈(0,1]：总分/(16×蛇长)。
+    1=蛇身全在最外圈；配额用此值，消除'总分随蛇长单调增长'的混杂
+    （否则配额退化为按长度选择，与食物主项重复）。"""
+    s = habit_edge_score(env)
+    return s / (16.0 * env.body_len.float().clamp(min=1))
+
+
+def habit_conn_score(env):
+    """习惯因素2（单连通）单步得分 [B]：蛇身以外自由空间（严格含尾占用）的
+    连通块数倒数——1 块=1，2 块=1/2，3 块=1/3，块越多越差。
+    实现：自由格标唯一 id，4 邻 min 标签传播 G² 轮后数不同标签数。"""
+    B, G, dev = env.B, env.G, env.device
+    occ = env._occupancy_flat().view(B, 1, G, G)
+    free = (occ < 0.5).float()
+    ids = torch.arange(1, G * G + 1, device=dev).view(1, 1, G, G).float()
+    INF = 1e9
+    label = torch.where(free > 0.5, ids, torch.full_like(ids, INF))
+    mp = torch.nn.functional.max_pool2d
+
+    def min_pool(x, kh, kw, ph, pw):
+        return -mp(-x, (kh, kw), stride=1, padding=(ph, pw))
+
+    prev = None
+    for it in range(G * G):
+        nb = torch.minimum(min_pool(label, 3, 1, 1, 0), min_pool(label, 1, 3, 0, 1))
+        label = torch.where(free > 0.5, torch.minimum(nb, label),
+                            torch.full_like(label, INF))
+        if it % 8 == 7:
+            if prev is not None and torch.equal(prev, label):
+                break
+            prev = label.clone()
+    lab = label.view(B, -1)
+    fr = free.view(B, -1)
+    cnt = torch.zeros(B, G * G + 1, device=dev)
+    hit = (fr > 0.5) & (lab < INF)
+    cnt.scatter_add_(1, lab.long().clamp(min=0, max=G * G), hit.float())
+    ncomp = (cnt > 0).sum(dim=1).float()
+    return 1.0 / ncomp.clamp(min=1.0)
 
 
 def _eval_sweep_chunk(pop_rep, cfg, bank):
@@ -1146,6 +1127,12 @@ def _eval_sweep_chunk(pop_rep, cfg, bank):
     tot_reach = torch.zeros(B, dtype=torch.float32, device=dev)
     tot_reach_n = torch.zeros(B, dtype=torch.float32, device=dev)
     min_reach = torch.full((B,), 1e9, dtype=torch.float32, device=dev)
+    # 行为遥测（test12 v5.1 三因素）累计器
+    tot_esum = torch.zeros(B, dtype=torch.float32, device=dev)
+    tot_eshare = torch.zeros(B, dtype=torch.float32, device=dev)
+    tot_conn = torch.zeros(B, dtype=torch.float32, device=dev)
+    conn_n = torch.zeros(B, dtype=torch.float32, device=dev)
+    beh_steps = torch.zeros(B, dtype=torch.float32, device=dev)
 
     E = torch.zeros(B, N, dtype=half, device=dev)
     I = torch.zeros(B, N, dtype=half, device=dev)
@@ -1183,6 +1170,18 @@ def _eval_sweep_chunk(pop_rep, cfg, bank):
         tot_act2 += (al & (act == 2)).float()
         turn_cnt += (al & (act != 0)).float()
 
+        # 行为遥测（步进前状态，test12 v5.1 三因素）
+        if bool(al.any()):
+            # 因素1 边角评分（16/8/4/2/1 圈层制）：总分 + 长度归一化占比
+            es = habit_edge_score(env)
+            tot_esum += al.float() * es
+            tot_eshare += al.float() * es / (16.0 * env.body_len.float().clamp(min=1))
+            # 因素2 conn：每 4 存活步采样一次连通块数倒数（严格含尾）
+            if t % 4 == 0:
+                tot_conn += al.float() * habit_conn_score(env)
+                conn_n += al.float()
+            beh_steps += al.float()
+
         env.step(act)
         ate_now = al & env.ate
         tot_food += ate_now.float()
@@ -1202,12 +1201,17 @@ def _eval_sweep_chunk(pop_rep, cfg, bank):
     mismatch = mis_cnt / mis_steps.clamp(min=1.0)
     island = ((min_reach < float(getattr(cfg, 'ISLAND_THRESHOLD', 0.3)))
               & (tot_reach_n > 0)).float()
+    edge_sum = tot_esum / beh_steps.clamp(min=1.0)
+    edge_share = tot_eshare / beh_steps.clamp(min=1.0)
+    conn_score = tot_conn / conn_n.clamp(min=1.0)
+    straight = 1.0 - (tot_act1 + tot_act2) / beh_steps.clamp(min=1.0)
     metrics = torch.stack((tot_food, tot_seen, tot_unseen, last, prox,
                            tot_wall + (env.died == 1).float(),
                            tot_self + (env.died == 2).float(),
                            tot_starve + (env.died == 3).float(),
                            tot_act1, tot_act2, turn_last, avg_reach,
-                           mismatch, min_reach.clamp(max=1.0), island), dim=1)
+                           mismatch, min_reach.clamp(max=1.0), island,
+                           edge_sum, conn_score, straight, edge_share), dim=1)
     return metrics
 
 
@@ -1241,7 +1245,9 @@ def _eval_pop_banks(pop, cfg, banks):
     """E=len(banks) 局并行评估：个体×E 复制进同一批扫描（局维折叠，扫描次数
     不随局数增长——GPU 利用率低时墙上时间 ∝ 扫描次数而非局数）。
     所有分块共用同一组 banks（CRN 关键）；评估副本先做弱连接屏蔽。
-    返回 [P,15] = E 局均值（列12=mismatch 率，13=min_reach，14=island_flag）。"""
+    返回 [P,19] = E 局均值（12=mismatch，13=min_reach，14=island（诊断）；
+    行为三因素：15=edge_sum（圈层总分）、16=conn_score（连通块倒数）、
+    17=straight、18=edge_share（总分/(16×蛇长)，配额用））。"""
     E = len(banks)
     dev = pop.device
     use_crn = banks[0] is not None
@@ -1253,7 +1259,7 @@ def _eval_pop_banks(pop, cfg, banks):
         bank = None
     max_B = _auto_eval_batch(cfg, dev)
     per_P = max(1, max_B // E)
-    ncol = 15
+    ncol = 19
     out = torch.zeros(pop.P, ncol)
     for lo in range(0, pop.P, per_P):
         hi = min(lo + per_P, pop.P)
@@ -1271,7 +1277,7 @@ def evaluate_population_gpu(pop, cfg, gen=0):
     """两阶段淘汰评估（CRN）：
     阶段1：全种群 × K1 局（同库精确可比）→ 保前 STAGE2_KEEP；
     阶段2：幸存者 × K2 局（新库），幸存者指标 = (K1·m1 + K2·m2)/(K1+K2)。
-    返回 (metrics[P,15], order[P])：order = 幸存者按累计适应度降序，
+    返回 (metrics[P,19], order[P])：order = 幸存者按累计适应度降序，
     其后为落选者按阶段1适应度降序——精英只能出自幸存者。
     """
     if getattr(cfg, 'USE_FP16', True):
@@ -1355,6 +1361,8 @@ def evolve_topology_gpu(pop, metrics, cfg, gen=0, order=None):
         extra = [i for i in te_order if i not in elite_set][:te_quota]
         if extra:
             elite_idx = elite_idx[:cfg.ELITE_SIZE - len(extra)] + extra
+    # 行为习惯不走配额：v7 起三因素以乘法因子并入适应度
+    # （food×(1+…)×conn），选择完全由统一适应度排序驱动。
     elites = pop[elite_idx]
 
     new_pop = pop.empty()
@@ -1597,6 +1605,92 @@ def load_checkpoint7(path, cfg):
 # ==========================================
 # 7. 主循环
 # ==========================================
+def plot_history_png(cfg, history):
+    """训练过程图：左栏食物曲线；右栏 best 个体适应度按来源堆叠
+    （food 红底 / eff 绿 / habit 橙 + 总分黑虚线）。"""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    matplotlib.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei',
+                                              'DejaVu Sans']
+    matplotlib.rcParams['axes.unicode_minus'] = False
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    gens = history['gen']
+    ax1.plot(gens, history['best_food'], label='Best Food',
+             color='red', marker='o', markersize=3)
+    ax1.plot(gens, history['avg_food'], label='Avg Food',
+             color='blue', alpha=0.6)
+    if any(v is not None for v in history.get('elite_food', [])):
+        ax1.plot(gens, history['elite_food'], label='Elite Food',
+                 color='green', alpha=0.8)
+    ax1.set_title("Evolution Progress — Food Count")
+    ax1.set_xlabel("Generation")
+    ax1.set_ylabel("Food Eaten")
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    # 右栏：适应度来源堆叠（v7 乘法归因：food×conn / eff / 少转弯 / 边角），黑虚线=总分
+    def _arr(key):
+        v = history.get(key, [])
+        return np.array([0.0 if x is None else float(x) for x in v])
+    p_food = _arr('fit_parts_food')
+    p_eff = _arr('fit_parts_eff')
+    p_st = _arr('fit_parts_straight')
+    p_ed = _arr('fit_parts_edge')
+    if len(gens) and (len(p_food) or len(history.get('best_fit', []))):
+        n = min(len(gens), len(history.get('best_fit', [])) or len(p_food))
+        g = gens[:n]
+        pf = np.nan_to_num(p_food[:n])
+        pe = np.nan_to_num(p_eff[:n])
+        ax2.stackplot(g, pf, pe, p_st, p_ed,
+                      colors=('#d9534f', '#5cb85c', '#428bca', '#f0ad4e'),
+                      alpha=0.75,
+                      labels=('食物数', 'eff 效率项',
+                              '少转弯项', '边角项'))
+        # 各层顶界线（层色细线）：薄层（如 eff 项）靠界线可辨
+        stack_top = pf + pe + p_st + p_ed
+        c1 = pf
+        c2 = pf + pe
+        c3 = c2 + p_st
+        for cc, col in ((c1, '#d9534f'), (c2, '#5cb85c'),
+                        (c3, '#428bca'), (stack_top, '#f0ad4e')):
+            ax2.plot(g, cc, color=col, lw=1.0, alpha=0.9)
+        pn = np.nan_to_num(_arr('fit_parts_noconn')[:n])
+        # 黑虚线 = 四项之和（当期 best 个体适应度），恒在堆叠顶，避免与
+        # 历史全局 best_fit（不同步）错位
+        ax2.plot(g, stack_top, color='black', lw=1.4, ls='--',
+                 label='适应度总分(当期best)')
+        # 单连通折扣：无 conn 缩放的假想适应度（虚线）与损失区（斜线填充）
+        if np.any(pn > stack_top + 1e-9):
+            ax2.plot(g, pn, color='gray', lw=1.2, ls='--',
+                     label='无单连通缩放')
+        if len(g):
+            # 结论标记：图内右下角，按堆叠顺序（自下而上）竖向排列
+            _txt = ('食物数 {:.1f}\neff 效率项 {:.2f}\n'
+                    '少转弯项 {:.1f}\n边角项 {:.1f}'.format(
+                        pf[-1], pe[-1], p_st[-1], p_ed[-1]))
+            ax2.text(0.98, 0.02, _txt, transform=ax2.transAxes,
+                     ha='right', va='bottom', fontsize=8, color='black',
+                     bbox=dict(facecolor='white', alpha=0.75,
+                               edgecolor='gray', lw=0.6))
+
+            ax2.fill_between(g, stack_top, pn,
+                             where=pn > stack_top + 1e-9,
+                             facecolor='none', hatch='///',
+                             edgecolor='gray', lw=0.8, ls='--',
+                             label='单连通折扣')
+        ax2.set_title('Best 个体适应度来源分解（堆叠）')
+        ax2.set_xlabel('Generation')
+        ax2.set_ylabel('Fitness')
+        ax2.legend(loc='upper left', fontsize=8)
+        ax2.grid(True, alpha=0.3)
+    plt.tight_layout()
+    hist_path = cfg.CHECKPOINT_PATH.replace('_checkpoint', '_history').replace('.pth', '.png')
+    fig.savefig(hist_path, dpi=100)
+    plt.close(fig)
+    print(f"历史曲线已保存: {hist_path}")
+
+
 def run_training(cfg):
     device = _resolve_device(cfg)
     print(f"[GPU] device = {device}  "
@@ -1604,22 +1698,35 @@ def run_training(cfg):
     if device.type == 'cuda':
         mem = torch.cuda.get_device_properties(device).total_memory / 1e9
         print(f"[GPU] 显存 {mem:.1f} GB, 自动评估批大小 = {_auto_eval_batch(cfg, device)}")
-    print(f"[筛选] CRN={cfg.USE_CRN} | 两阶段 K1={cfg.STAGE1_EPS} → 保 "
+    print(f"[环境] grid={cfg.GRID_SIZE} max_steps={cfg.MAX_STEPS} | "
+          f"饿死钟 steps_wo_food > {cfg.STARVE_SLOPE}·len+20 | "
+          f"疲劳 turn_gain={cfg.FATIGUE_TURN_GAIN} decay={cfg.FATIGUE_TURN_DECAY} | "
+          f"单侧转弯判死 {cfg.ONE_SIDED_TURN_DEATH}")
+    print(f"[种群] pop={cfg.POP_SIZE} 精英={cfg.ELITE_SIZE} 列={cfg.NUM_COLUMNS} "
+          f"密度={cfg.INIT_DENSITY} | 进化余弦 {cfg.EVO_COS_MODE} 周期{cfg.EVO_COS_PERIOD}")
+    print(f"[筛选] CRN={cfg.USE_CRN}(seed={cfg.CRN_SEED}) | 两阶段 K1={cfg.STAGE1_EPS} → 保 "
           f"{cfg.STAGE2_KEEP} → K2={cfg.EVAL_EPISODES} | "
           f"变异 s~{cfg.MUT_SCALE_DIST}(σ={cfg.MUT_SCALE_SIGMA}) "
           f"clip[{cfg.MUT_SCALE_MIN},{cfg.MUT_SCALE_MAX}]")
-    print(f"[适应度 v{cfg.FITNESS_VERSION}] food + {cfg.FOOD_EFF_WEIGHT}·eff + "
-          f"{cfg.TURN_EFF_W}·min(SL/TL,{cfg.TURN_EFF_CAP:.0f})/{cfg.TURN_EFF_CAP:.0f}"
-          f"（{cfg.TURN_EFF_MODE} 口径）| 弱连接屏蔽 "
-          f"W_rec×{1 - cfg.WEAK_MASK_FRAC:.0%} | te配额精英 {cfg.TE_ELITE}")
-    print(f"[test12] obs={cfg.OBS_ENC_VERSION} | 孤岛惩罚：min_reach<"
-          f"{cfg.ISLAND_THRESHOLD} → ×{cfg.ISLAND_PENALTY}")
+    print(f"[适应度 v{cfg.FITNESS_VERSION}] food×(1 + {cfg.W_EFF}·eff + "
+          f"{cfg.W_STRAIGHT}·straight + {cfg.W_EDGE}·edge_share)×conn | "
+          f"弱连接屏蔽 W_rec×{1 - cfg.WEAK_MASK_FRAC:.0%} | "
+          f"单侧判死 {cfg.ONE_SIDED_TURN_DEATH}")
+    print(f"[观测] {cfg.OBS_ENC_VERSION} frame={getattr(cfg, 'OBS_FOOD_FRAME', 'ego')} "
+          f"K={cfg.OBS_FOOD_SCALE} self/obs×{cfg.OBS_SELF_SCALE}/{cfg.OBS_OBSTACLE_SCALE} | "
+          f"孤岛诊断阈值 min_reach<{cfg.ISLAND_THRESHOLD}")
+    print(f"[输出] ckpt={cfg.CHECKPOINT_PATH} | best={cfg.BEST_MODEL_PATH} | "
+          f"history={cfg.HISTORY_JSON_PATH}")
     t_program = time.perf_counter()
 
     start_gen = 0
     pop = GeneStack(cfg, device=device)
     history = {'gen': [], 'best_food': [], 'avg_food': [], 'best_seen': [],
-               'best_unseen': [], 'elite_food': [], 'best_fit': [], 'best_turneff': []}
+               'best_unseen': [], 'elite_food': [], 'best_fit': [], 'best_turneff': [],
+               'best_epref': [], 'best_conn': [], 'best_straight': [],
+               'fit_parts_food': [], 'fit_parts_eff': [],
+               'fit_parts_straight': [], 'fit_parts_edge': [],
+               'fit_parts_noconn': []}
     cum_eval_time = 0.0
     cum_evolve_time = 0.0
     best_state = None
@@ -1641,10 +1748,18 @@ def run_training(cfg):
             start_gen = int(ck['next_gen'])
             pop.unpack(ck['pop'])
             history = ck.get('history', history)
-            for k in ('elite_food', 'best_fit', 'best_turneff'):
+            for k in ('elite_food', 'best_fit', 'best_turneff',
+                      'best_epref', 'best_conn', 'best_straight',
+                      'fit_parts_food', 'fit_parts_eff',
+                      'fit_parts_straight', 'fit_parts_edge',
+                      'fit_parts_noconn'):
                 history.setdefault(k, [])
             # 跨版本续训（如 7g 断点）时补齐新键长度，避免曲线错位
-            for k in ('elite_food', 'best_fit', 'best_turneff'):
+            for k in ('elite_food', 'best_fit', 'best_turneff',
+                      'best_epref', 'best_conn', 'best_straight',
+                      'fit_parts_food', 'fit_parts_eff',
+                      'fit_parts_straight', 'fit_parts_edge',
+                      'fit_parts_noconn'):
                 pad = len(history.get('gen', [])) - len(history[k])
                 if pad > 0:
                     history[k].extend([None] * pad)
@@ -1728,6 +1843,32 @@ def run_training(cfg):
             history['best_fit'].append(float(b_fit))
             history['best_turneff'].append(float(b_te))
 
+            # best 个体行为遥测（卡55监控：贴边率/头周自由度应随选择缓升）
+            history['best_epref'].append(float(mn[best_idx][18]))   # edge_share
+            history['best_conn'].append(float(mn[best_idx][16]))    # conn_score
+            history['best_straight'].append(float(mn[best_idx][17]))
+
+            # best 个体适应度分解（过程图右栏堆叠：food/eff/habit×3 因素）
+            b_row = mn[best_idx]
+            # 适应度分解（v7 加法归因，与公式同构）：四份之和恰=总分；
+            # noconn 基准 = conn=1 时的假想适应度（差值即单连通折扣）。
+            # 教训：顺序累乘分解 (1+a)(1+b)(1+c) 会多出交叉项，使 stack_top
+            # 抬高到 noconn 之上 → 绘图条件永假、虚线不显示（实测踩坑）。
+            _c = float(b_row[16]) if len(b_row) > 16 else 1.0
+            _eff = float(b_row[0]) / max(float(b_row[3]), 1.0)
+            _base = float(b_row[0]) * _c
+            history['fit_parts_food'].append(_base)
+            history['fit_parts_eff'].append(
+                _base * float(cfg.W_EFF) * _eff)
+            history['fit_parts_straight'].append(
+                _base * float(cfg.W_STRAIGHT) * float(b_row[17]))
+            history['fit_parts_edge'].append(
+                _base * float(cfg.W_EDGE) * float(b_row[18]))
+            history['fit_parts_noconn'].append(
+                float(b_row[0]) * (1.0 + float(cfg.W_EFF) * _eff
+                                   + float(cfg.W_STRAIGHT) * float(b_row[17])
+                                   + float(cfg.W_EDGE) * float(b_row[18])))
+
             if key_fn(mn[best_idx]) > key_fn(best_row):
                 best_food = b_food
                 best_seen = b_seen
@@ -1758,6 +1899,9 @@ def run_training(cfg):
                       f"BestFood: {b_food:.2f} | BestFit: {b_fit:.3f} | "
                       f"BestTurnEff: {b_te:.2f} | BestTurn: {b_turn:.3f} | "
                       f"BestReach: {float(mn[best_idx][11]):.3f} | "
+                      f"BestEShare: {float(mn[best_idx][18]):.2f} | "
+                      f"BestConn: {float(mn[best_idx][16]):.2f} | "
+                      f"BestStraight: {float(mn[best_idx][17]):.2f} | "
                       f"AvgFood: {avg_food:.2f} | EliteFood: {elite_food:.2f} | "
                       f"Die(W/S/St): {avg_wall:.2f}/{avg_self:.2f}/{avg_starve:.2f} | "
                       f"eval {eval_time:.1f}s / evolve {evolve_time:.1f}s")
@@ -1808,36 +1952,7 @@ def run_training(cfg):
 
     # ---- 历史曲线 ----
     try:
-        import matplotlib
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-        ax1.plot(history['gen'], history['best_food'], label='Best Food',
-                 color='red', marker='o', markersize=3)
-        ax1.plot(history['gen'], history['avg_food'], label='Avg Food',
-                 color='blue', alpha=0.6)
-        if history.get('elite_food'):
-            ax1.plot(history['gen'], history['elite_food'], label='Elite Food',
-                     color='green', alpha=0.8)
-        ax1.set_title("Evolution Progress — Food Count")
-        ax1.set_xlabel("Generation")
-        ax1.set_ylabel("Food Eaten")
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        ax2.plot(history['gen'], history['best_seen'], label='Best Seen',
-                 color='green', marker='s', markersize=3)
-        ax2.plot(history['gen'], history['best_unseen'], label='Best Unseen',
-                 color='purple', marker='^', markersize=3)
-        ax2.set_title("Best Seen/Unseen Steps")
-        ax2.set_xlabel("Generation")
-        ax2.set_ylabel("Steps")
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-        plt.tight_layout()
-        hist_path = cfg.CHECKPOINT_PATH.replace('_checkpoint', '_history').replace('.pth', '.png')
-        fig.savefig(hist_path, dpi=100)
-        plt.close(fig)
-        print(f"历史曲线已保存: {hist_path}")
+        plot_history_png(cfg, history)
     except Exception as e:
         print(f"(matplotlib 曲线跳过: {e})")
 
@@ -1949,41 +2064,182 @@ def selfcheck(cfg):
     _chk("朝W 正前食物→信号后[10]", float(obs1[0, 10]), K)
     _chk("朝W 正前食物→前无信号[8]", float(obs1[0, 8]), 0.0)
 
-    print("=== 自检 0b：孤岛惩罚（按局触发率线性折减）===")
-    mi = np.zeros(15)
-    mi[0], mi[3], mi[10] = 10.0, 100.0, 0.0
-    f_no = _fitness_econ(mi, cfg)
-    pen = float(cfg.ISLAND_PENALTY)
+    print("=== 自检 0b（E0）：习惯因素1 edge_pref（占据边角）===")
     ok0b = True
-    for rate in (1.0, 0.5, 0.0):
-        mi[14] = rate
-        f = _fitness_econ(mi, cfg)
-        want = f_no * (1.0 - (1.0 - pen) * rate)
-        good = abs(f - want) < 1e-9
+    scb = Config(); scb.DEVICE = cfg.DEVICE
+    envb = BatchedSnakeEnv(scb, 3, dev)
+    envb.reset()
+    body = torch.zeros(3, envb.MAXLEN, 2, dtype=torch.long, device=dev)
+    for i in range(12):                                    # 全在外环：顶边+右列拐角
+        body[0, i] = (torch.tensor([0, i]) if i < 10 else torch.tensor([i - 9, 9]))
+    for i, (r, c) in enumerate(((3, 3), (3, 4), (4, 4), (4, 3))):   # 全在内部 2×2
+        body[1, i] = torch.tensor([r, c])
+    for i in range(8):                                     # 混合：4 环 + 4 内
+        body[2, i] = (torch.tensor([0, i]) if i < 4 else torch.tensor([3, i - 2]))
+    envb.body = body
+    envb.body_len = torch.tensor([12, 4, 8], device=dev)
+    envb.head = body[torch.arange(3, device=dev), 0]
+    envb.food = torch.tensor([[9, 0], [0, 9], [5, 5]], device=dev)
+    es = habit_edge_score(envb).cpu().numpy()
+    # 圈层分 16/8/4/2/1：局0 全外环 12×16=192；局1 内部 2×2 → (3,3)L3=2,
+    # (3,4)L3=2, (4,4)L4=1, (4,3)L3=2 → 7；局2 混合 4 外环 64 + 内部
+    # (3,2)L2=4,(3,3)L3=2,(3,4)L3=2,(3,5)L3=2 → 10 → 74
+    want = (192.0, 7.0, 74.0)
+    for i in range(3):
+        good = abs(es[i] - want[i]) < 1e-5
         ok0b = ok0b and good
-        print(f"  触发率{rate:.1f}: {f:.4f} (期望 {want:.4f}) {'OK' if good else 'FAIL'}")
-    print(f"  孤岛惩罚分级 {'OK' if ok0b else 'FAIL'}")
+        print(f"  局{i} edge_score={es[i]:.1f} (期望 {want[i]:.1f}) "
+              f"{'OK' if good else 'FAIL'}")
+    sh = habit_edge_share(envb).cpu().numpy()
+    want_sh = (192 / (16 * 12), 7 / (16 * 4), 74 / (16 * 8))
+    for i in range(3):
+        good = abs(sh[i] - want_sh[i]) < 1e-5
+        ok0b = ok0b and good
+        print(f"  局{i} edge_share={sh[i]:.4f} (期望 {want_sh[i]:.4f}) "
+              f"{'OK' if good else 'FAIL'}")
+    good = es[0] > es[2] > es[1] and sh[0] > sh[2] > sh[1]
+    ok0b = ok0b and good
+    print(f"  单调性 全环>混合>全内 {'OK' if good else 'FAIL'}")
+    print(f"  E0 因素1 {'OK' if ok0b else 'FAIL'}")
 
-    print("=== 自检 1：适应度公式（v3：ratio W=3 CAP=4）===")
-    m = np.zeros(12)
-    m[0], m[3], m[10] = 10.0, 100.0, 10.0   # food=10, SL=100, TL=10 → te=10→cap
+    print("=== 自检 0b2（E0）：习惯因素2 conn_score（连通块倒数，严格含尾）===")
+    ok0b2 = True
+    envc = BatchedSnakeEnv(scb, 3, dev)
+    envc.reset()
+    body = torch.zeros(3, envc.MAXLEN, 2, dtype=torch.long, device=dev)
+    for i in range(10):                                    # 局0: col4 整列墙 + 尾(9,3)
+        body[0, i] = torch.tensor([i, 4])
+    body[0, 10] = torch.tensor([9, 3])                     # 尾在左腔：真分割
+    for i in range(3):                                     # 局1: 开阔盘面短蛇
+        body[1, i] = torch.tensor([0, i])
+    for i, (r, c) in enumerate(((0, 1), (1, 1), (1, 0))):  # 局2: 3 格 L 形围死角 (0,0)
+        body[2, i] = torch.tensor([r, c])
+    envc.body = body
+    envc.body_len = torch.tensor([11, 3, 3], device=dev)
+    envc.head = torch.tensor([[0, 3], [0, 0], [0, 1]], device=dev)  # 头=body[0] 位置
+    envc.food = torch.tensor([[0, 8], [9, 9], [9, 0]], device=dev)
+    cs = habit_conn_score(envc).cpu().numpy()
+    # 局0 两腔 → 1/2；局1 开阔 → 1；局2 角落 3 格围出 (0,0) → 1/2
+    want = (0.5, 1.0, 0.5)
+    for i in range(3):
+        good = abs(cs[i] - want[i]) < 1e-5
+        ok0b2 = ok0b2 and good
+        print(f"  局{i} conn_score={cs[i]:.3f} (期望 {want[i]:.1f}) "
+              f"{'OK' if good else 'FAIL'}")
+    print(f"  E0 因素2 {'OK' if ok0b2 else 'FAIL'}")
+
+    print("=== 自检 0b3（E0）：习惯因素3 straight（少转弯）===")
+    ok0b3 = True
+    for a1, a2, steps, want_s in ((0.0, 0.0, 200.0, 1.0), (50.0, 0.0, 200.0, 0.75),
+                                  (200.0, 0.0, 200.0, 0.0)):
+        got = 1.0 - (a1 + a2) / max(steps, 1.0)
+        good = abs(got - want_s) < 1e-9
+        ok0b3 = ok0b3 and good
+        print(f"  转弯{a1 + a2:.0f}/{steps:.0f}步 straight={got:.2f} "
+              f"(期望 {want_s:.2f}) {'OK' if good else 'FAIL'}")
+    print(f"  E0 因素3 {'OK' if ok0b3 else 'FAIL'}")
+
+    print("=== 自检 0c：单侧转弯判死 ===")
+    ok0c = True
+    for a1, a2, dead in ((50.0, 0.0, True), (0.0, 50.0, True),
+                         (50.0, 3.0, False), (0.5, 0.0, False),
+                         (13.0, 13.0, False)):
+        ms = np.zeros(18)
+        ms[0], ms[3], ms[10], ms[8], ms[9] = 10.0, 100.0, 0.0, a1, a2
+        f = _fitness_econ(ms, cfg)
+        is_dead = (f == -1e9)
+        good = (is_dead == dead)
+        ok0c = ok0c and good
+        print(f"  左转{a1:.1f}/右转{a2:.1f} → fit={f:>10.2f} "
+              f"{'判死' if is_dead else '存活'} (期望{'判死' if dead else '存活'}) "
+              f"{'OK' if good else 'FAIL'}")
+    print(f"  单侧转弯判死 {'OK' if ok0c else 'FAIL'}")
+
+    print("=== 自检 1：适应度公式（v7 乘法式）===")
+    m = np.zeros(19)
+    m[0], m[3] = 10.0, 100.0                       # food=10, eff=0.1
+    m[17], m[18], m[16] = 0.5, 0.25, 0.5           # straight/edge_share/conn
     f1 = _fitness_econ(m, cfg)
-    expect1 = 10 + 0.3 * 0.1 + 3.0 * 1.0
-    m[10] = 0.0                              # 全程直行 → te=cap
+    want1 = 10.0 * (1 + cfg.W_EFF * 0.1 + cfg.W_STRAIGHT * 0.5
+                    + cfg.W_EDGE * 0.25) * 0.5
+    print(f"  组合值: {f1:.4f} (期望 {want1:.4f}) "
+          f"{'OK' if abs(f1 - want1) < 1e-9 else 'FAIL'}")
+    m[17], m[18], m[16] = 0.0, 0.0, 1.0            # 全坏习惯+单连通 → 下限
     f2 = _fitness_econ(m, cfg)
-    m2 = np.zeros(12)                        # 高密度：SL=100, TL=50 → te=2 → 1.5 分
-    m2[0], m2[3], m2[10] = 10.0, 100.0, 50.0
-    f3 = _fitness_econ(m2, cfg)
-    expect3 = 10 + 0.3 * 0.1 + 3.0 * 0.5
-    m[0] = 0.0                               # 零食 → 0
+    f2_lo = 10.0 * (1 + cfg.W_EFF * 0.1)
+    print(f"  下限: {f2:.4f} (期望 {f2_lo:.4f}=food×(1+eff项)) "
+          f"{'OK' if abs(f2 - f2_lo) < 1e-9 else 'FAIL'}")
+    m[17], m[18], m[16] = 1.0, 1.0, 1.0            # 上限
+    f3 = _fitness_econ(m, cfg)
+    f3_hi = 10.0 * (1 + cfg.W_EFF * 0.1 + cfg.W_STRAIGHT + cfg.W_EDGE)
+    print(f"  上限: {f3:.4f} (期望 {f3_hi:.4f}) "
+          f"{'OK' if abs(f3 - f3_hi) < 1e-9 else 'FAIL'}")
+    m[0] = 0.0
     f4 = _fitness_econ(m, cfg)
-    print(f"  有序(te≥cap): {f1:.4f} (期望 {expect1:.4f}) "
-          f"{'OK' if abs(f1 - expect1) < 1e-9 else 'FAIL'}")
-    print(f"  全直行: {f2:.4f} (应= {expect1:.4f}) "
-          f"{'OK' if abs(f2 - expect1) < 1e-9 else 'FAIL'}")
-    print(f"  高密度(te=2): {f3:.4f} (期望 {expect3:.4f}) "
-          f"{'OK' if abs(f3 - expect3) < 1e-9 else 'FAIL'}")
     print(f"  food=0: {f4:.4f} (期望 0) {'OK' if f4 == 0.0 else 'FAIL'}")
+
+    print("=== 自检 1b（v7 性质）：乘法杠杆随食物放大 ===")
+    rng = np.random.default_rng(11)
+    ok1b = True
+    for food in (10.0, 100.0):
+        mA = np.zeros(19); mA[0] = food; mA[3] = food * 10
+        mA[17], mA[18], mA[16] = 0.0, 0.0, 1.0     # 坏习惯
+        mB = np.zeros(19); mB[0] = food; mB[3] = food * 10
+        mB[17], mB[18], mB[16] = 1.0, 1.0, 1.0     # 好习惯
+        d = _fitness_econ(mB, cfg) - _fitness_econ(mA, cfg)
+        print(f"  food={food:.0f}: 习惯全好-全坏 = {d:+.2f} 分")
+    # 同样的习惯差异，100 食时的杠杆应是 10 食时的 10 倍
+    m = np.zeros(19)
+    m[3] = 1e9
+    lever = []
+    for food in (10.0, 100.0):
+        mA = np.zeros(19); mA[0] = food; mA[3] = food * 10
+        mA[17], mA[18], mA[16] = 0.0, 0.0, 1.0
+        mB = np.zeros(19); mB[0] = food; mB[3] = food * 10
+        mB[17], mB[18], mB[16] = 1.0, 1.0, 1.0
+        lever.append(_fitness_econ(mB, cfg) - _fitness_econ(mA, cfg))
+    ratio_ok = abs(lever[1] / max(lever[0], 1e-9) - 10.0) < 0.1
+    ok1b = ratio_ok
+    print(f"  杠杆比(100食/10食) = {lever[1] / max(lever[0], 1e-9):.2f} (期望 10) "
+          f"{'OK' if ratio_ok else 'FAIL'}")
+    # 下界：fitness ≥ food×conn 恒成立（随机 2000 组）
+    ok_lb = True
+    for _ in range(2000):
+        m2 = np.zeros(19)
+        m2[0] = rng.random() * 60 + 1
+        m2[3] = m2[0] * rng.random() * 20 + 1
+        m2[17], m2[18] = rng.random(), rng.random()
+        m2[16] = rng.random() * 0.9 + 0.1
+        f = _fitness_econ(m2, cfg)
+        if f < m2[0] * m2[16] - 1e-9:
+            ok_lb = False
+            break
+    print(f"  下界 fitness ≥ food×conn（2000 组随机）: {ok_lb} "
+          f"{'OK' if ok_lb else 'FAIL'}")
+    ok1b = ok1b and ok_lb
+
+    print("=== 自检 1c（v7 性质）：history 分解与公式一致性 ===")
+    rng2 = np.random.default_rng(5)
+    ok1c = True
+    for _ in range(1000):
+        row = np.zeros(19)
+        row[0] = rng2.random() * 50 + 1
+        row[3] = row[0] * rng2.random() * 20 + 1
+        row[17], row[18] = rng2.random(), rng2.random()
+        row[16] = rng2.random() * 0.9 + 0.1
+        c = row[16]
+        base = row[0] * c
+        parts = (base + base * cfg.W_EFF * (row[0] / max(row[3], 1))
+                 + base * cfg.W_STRAIGHT * row[17]
+                 + base * cfg.W_EDGE * row[18])
+        noconn = row[0] * (1 + cfg.W_EFF * (row[0] / max(row[3], 1))
+                           + cfg.W_STRAIGHT * row[17] + cfg.W_EDGE * row[18])
+        if (abs(parts - _fitness_econ(row, cfg)) > 1e-6
+                or noconn < parts - 1e-9):
+            ok1c = False
+            break
+    print(f"  分解和=公式 & noconn≥总分（1000 组随机）: {ok1c} "
+          f"{'OK' if ok1c else 'FAIL'}")
 
     print("=== 自检 2：变异强度分布 ===")
     dev = _resolve_device(cfg)
@@ -2083,12 +2339,16 @@ def main():
                     help='评估期 W_rec 弱连接屏蔽比例（默认 0.20，0=关）')
     ap.add_argument('--te-elite', type=int, default=None,
                     help='te-配额精英数（默认 0=关；行为学 B5 对策）')
+    ap.add_argument('--w-straight', type=float, default=None,
+                    help='v7 少转弯因子 W_STRAIGHT（默认 0.5）')
+    ap.add_argument('--w-edge', type=float, default=None,
+                    help='v7 边角因子 W_EDGE（默认 0.5）')
     ap.add_argument('--imitation-w', type=float, default=None,
                     help='模仿引导权重（默认 0=关；建议 2.0）')
     ap.add_argument('--island-threshold', type=float, default=None,
                     help='孤岛判定阈值：min_reach<阈值×自由格 触发（默认 0.3）')
-    ap.add_argument('--island-penalty', type=float, default=None,
-                    help='孤岛适应度罚因子（默认 0.1；1.0=关闭）')
+    ap.add_argument('--no-one-sided-death', action='store_true',
+                    help='关闭单侧转弯判死（默认开启：淘汰单向绕圈形态）')
     ap.add_argument('--stage1-eps', type=int, default=None,
                     help='阶段1 局数 K1（默认 3）')
     ap.add_argument('--stage2-eps', type=int, default=None,
@@ -2140,7 +2400,11 @@ def main():
             cfg.LATEST_GEN_BEST_MODEL_PATH = f'test12_{arm}_latest_gen_best.pth'
             cfg.HISTORY_JSON_PATH = f'test12_{arm}_history.json'
     if args.eff_weight is not None:
-        cfg.FOOD_EFF_WEIGHT = args.eff_weight
+        cfg.W_EFF = args.eff_weight
+    if args.w_straight is not None:
+        cfg.W_STRAIGHT = args.w_straight
+    if args.w_edge is not None:
+        cfg.W_EDGE = args.w_edge
     if args.turn_eff_w is not None:
         cfg.TURN_EFF_W = args.turn_eff_w
     if args.turn_eff_cap is not None:
@@ -2155,8 +2419,8 @@ def main():
         cfg.IMITATION_W = args.imitation_w
     if args.island_threshold is not None:
         cfg.ISLAND_THRESHOLD = args.island_threshold
-    if args.island_penalty is not None:
-        cfg.ISLAND_PENALTY = args.island_penalty
+    if args.no_one_sided_death:
+        cfg.ONE_SIDED_TURN_DEATH = False
     if args.name:
         cfg.CHECKPOINT_PATH = f'test12_{args.name}_checkpoint.pth'
         cfg.BEST_MODEL_PATH = f'test12_{args.name}_best_model.pth'

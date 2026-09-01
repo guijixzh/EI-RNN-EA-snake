@@ -8,7 +8,7 @@
 SiNNtry/
 ├── einbrain/         ★ 经过考验有效的 EI-RNN 整合通用包（供后续调用/实验）
 │   ├── config.py       统一配置（脑/环境/进化/PPO/GPU/NEAT）
-│   ├── env.py          贪吃蛇环境（24 维射线观测） + RaySnakeEnv（32 维 8 方向观测）
+│   ├── env.py          贪吃蛇环境（24 维射线观测） + RaySnakeEnv（32 维 8 方向观测） + ProjSnakeEnv（test7b 投影观测复刻）
 │   ├── brain.py        统一 EIBrainRegion 脑模型
 │   ├── dynamics.py     共享 E-I 核心数学
 │   ├── evolve.py       CPU 进化训练（test5d 语义）
@@ -18,14 +18,31 @@ SiNNtry/
 │   ├── io.py           统一保存/加载，兼容三格式模型互作种子
 │   ├── deliberation.py K 帧思考
 │   └── vis.py          可视化
-├── experiments/      历史实验脚本（test1..test8 及 test5b/test5c，归档保留）
+├── test7b*.py        ★ 活跃实验线 1：GPU 进化冠军线（67 分）+ 基准脚本
+├── test12*.py        ★ 活跃实验线 2：ego 观测重写 + 适应度 v7（含 s1/s2 前缀跑产物）
+├── experiments/      历史实验归档：test1..test8 及分析脚本平铺；
+│                     主题子目录 test7_series/（test7→7h）、test10_lunar/（含云端部署包）、
+│                     test11/、test13_ppo/
+├── deploy_test12/    test12 的 AutoDL 云端部署包
 ├── bench/             性能基准（列数扫描 / A-B 对比 / 加速比）
 ├── tools/             实时脑活动可视化服务器（brain_visualizer + static）
-├── models/            训练好的模型权重（test4b/5/5a/5d/6/7 等，含早期 LSTM 预训练）
-├── results/           训练曲线/拓扑等可视化输出图
+├── models/            训练好的模型权重（test4b/5/5a/5d/6/7/8 等，含早期 LSTM 预训练）
+├── results/           训练曲线/基准/诊断等数据与图
 ├── logs/              运行日志
-└── docs/              实验演进分析文档
+└── docs/              实验演进分析与各主题实验日志
 ```
+
+## 实验日志索引（docs/）
+
+| 日志 | 主题 | 状态 |
+|---|---|---|
+| `docs/test_evolution_analysis.md` | test1–8 全演进分析 + §4 后续演进索引 | 持续维护 |
+| `docs/test7_series_experiment_log.md` | GPU 进化主线 test7→7h + 外围 A/B 实验群 | 已归档（7b 冠军线活跃） |
+| `docs/test9_experiment_log.md` | 链接影响/剪枝分析 | 已结题 |
+| `docs/test10_lunar_experiment_log.md` | LunarLander 二度移植 | 云端长跑，结果未归档 |
+| `docs/test11_experiment_log.md` | 锦标赛筛选 vs 两阶段 | 已结题（保留两阶段） |
+| `docs/test12_experiment_log.md` | ego 观测 + 适应度 v7（当前主线） | 活跃 |
+| `docs/test13_ppo_experiment_log.md` | 冠军脑剪枝固化 + PPO 微调 | 已结题（判定不可行） |
 
 ## 快速上手（einbrain 包）
 
@@ -60,14 +77,16 @@ brain, food, steps = io.load_best_model_brain('test5d_best_model.pth', cfg)
 
 ## 运行历史实验
 
-历史脚本归档于 `experiments/`，保持原样可复现：
+历史脚本归档于 `experiments/`（test1..test8 平铺；test7 系列 / test10 /
+test11 / test13 在对应主题子目录），保持原样可复现。归档脚本中的模型/
+断点路径按当时约定解析（相对仓库根目录），从其他目录运行需自行对齐：
 
 ```bash
 cd experiments
 python test5d.py                    # 最优进化版
 python test5a_smoke_test.py         # 快速自检
 python test6.py                     # PPO
-python test7.py --smoke             # GPU 自检
+python test7_series/test7h.py --smoke   # GPU CRN 筛选版自检
 python test8.py --smoke             # 真正 NEAT × EI-RNN（K=5，32 维观测）自检
 ```
 

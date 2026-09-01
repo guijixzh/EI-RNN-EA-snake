@@ -53,9 +53,10 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 MODELS_DIR = os.path.join(REPO_ROOT, "models")
 DEFAULT_MODEL = os.path.join(MODELS_DIR, "test5a_best_model.pth")
 MODEL_FAST_PATH = os.path.join(MODELS_DIR, "test5d_best_model_33.pth")
-# 默认加载：优先最新版本的引擎模型（7g > 7d > 7c > 7b > 7a > 5a）
+# 默认加载：优先最新版本的引擎模型（12 > 7g > 7d > 7c > 7b > 7a > 5a）
 DEFAULT_MODEL_KEY = next(
-    (key for key, fname in [("7g", "test7g_econ_best_model.pth"),
+    (key for key, fname in [("12", "test12_econ_best_model.pth"),
+                            ("7g", "test7g_econ_best_model.pth"),
                             ("7d", "test7d_econ_best_model.pth"),
                             ("7c", "test7c_latest_gen_best.pth"),
                             ("7b", "test7b_best_model.pth"),
@@ -63,7 +64,7 @@ DEFAULT_MODEL_KEY = next(
      if os.path.exists(os.path.join(REPO_ROOT, fname))), "5a")
 
 TOP_REC_EDGES = 140      # 拓扑图中展示的递归边 top-K 条数
-TOP_REC_EDGES_3D = 900   # 3D 弹簧图使用的递归边 top-K 条数
+REC3D_TOP_PER_NEURON = 10   # 3D 弹簧图：每个神经元保留自己最大权重的前 10 条输入边
 
 
 # ============================================================
@@ -93,7 +94,11 @@ class Engine:
 
 
 # 顺序即 detect 优先级：专有字段多的（新版本）放前面
+# 注意：test12 的 Config 也含 OBS_MANHATTAN（与 7g 同），必须排在 7g 之前，
+#       用其专有字段（OBS_ENC_VERSION / ISLAND_PENALTY）区分。
 ENGINES = [
+    Engine("12", "test12.py",
+           lambda c: "OBS_ENC_VERSION" in c or "ISLAND_PENALTY" in c),
     Engine("7g", "test7g.py", lambda c: "OBS_MANHATTAN" in c),
     Engine("7d", "test7d.py",
            lambda c: "TURN_COST" in c or "TURN_PENALTY" in c or
@@ -108,6 +113,7 @@ ENGINES = [
 
 # 内置快捷 key -> 默认模型文件名（不存在时回落到扫描到的第一个）
 ENGINE_DEFAULT_FILE = {
+    "12": "test12_econ_best_model.pth",
     "7a": "test7a_v5a_best_model.pth",
     "7b": "test7b_best_model.pth",
     "7c": "test7c_latest_gen_best.pth",
@@ -169,7 +175,25 @@ def load_gene_model(path, engine):
     pop.random_init()
     pop.set_individual_from_state(0, st)
     pop.refresh_eff()
-    return BrainGeneAdapter(pop, cfg, engine), cfg, float(food), float(steps)
+    brain = BrainGeneAdapter(pop, cfg, engine)
+    # test12 部署形态 = 评估形态：弱连接屏蔽（W_rec 最弱 WEAK_MASK_FRAC 置零），
+    # 与 apply_weak_mask 同口径（逐行 kthvalue 阈值），保证可视化动力学与训练评估一致
+    frac = float(getattr(cfg, "WEAK_MASK_FRAC", 0.0))
+    if frac > 0:
+        with torch.no_grad():
+            W, M = brain.W_rec, brain.M_rec
+            mag = W.abs() * M
+            for r in range(W.shape[0]):
+                m_r = mag[r][M[r] > 0]
+                if m_r.numel() == 0:
+                    continue
+                kk = int(math.ceil(m_r.numel() * frac))
+                if kk <= 0:
+                    continue
+                thr = torch.kthvalue(m_r, kk).values
+                W[r] = torch.where((M[r] > 0) & (mag[r] <= thr),
+                                   torch.zeros_like(W[r]), W[r])
+    return brain, cfg, float(food), float(steps)
 
 
 # ============================================================
@@ -189,10 +213,16 @@ def make_cfg_from_dict(cfg_dict):
 
 
 def available_models():
-    """模型下拉框枚举：内置 5a/fast + 自动扫描根目录所有 test7 系最优模型"""
+    """模型下拉框枚举：内置 5a/fast/12 + 自动扫描根目录所有 test7/test12 系最优模型"""
     models = [("5a", "5a 最优 (256)"), ("fast", "5d 最优 (256)")]
-    for p in sorted(glob.glob(os.path.join(REPO_ROOT, "test7*_best*.pth"))):
+    if os.path.exists(os.path.join(REPO_ROOT, ENGINE_DEFAULT_FILE["12"])):
+        models.append(("12", "12 最优 (256)"))
+    scanned = sorted(glob.glob(os.path.join(REPO_ROOT, "test7*_best*.pth"))) + \
+              sorted(glob.glob(os.path.join(REPO_ROOT, "test12*_best*.pth")))
+    for p in scanned:
         name = os.path.basename(p)
+        if name == ENGINE_DEFAULT_FILE.get("12"):
+            continue   # 已用内置友好标签 "12" 列出，避免重复
         models.append((name, name))
     return models
 
@@ -392,17 +422,23 @@ def compute_layout(brain, cfg):
             alpha = (abs(w) - w_min) / (w_max - w_min + 1e-8)
             rec_edges.append([src, tgt, w, float(alpha)])
 
-    # 3D 弹簧图边表：top-K 按 |w| 排序，保留符号与归一化强度
-    edges_3d = [(j, i, float(W_rec_np[i, j]))
-                for i in range(N) for j in range(N) if M_rec_np[i, j] > 0]
+    # 3D 弹簧图边表：每个神经元只保留自己权重最大的前 10 条输入边
+    # （W_rec[i, j] = j→i 的权重，按行取 top-10 → 每柱恰好 10 条、无孤立柱）。
+    # alpha 用秩（CDF）：权重→弹性换算的归一档位，重尾分布下不受幅值压挤。
+    edges_3d = []
+    for i in range(N):
+        row = [(abs(float(W_rec_np[i, j])), j) for j in range(N) if M_rec_np[i, j] > 0]
+        if not row:
+            continue
+        row.sort(reverse=True)
+        for w_abs, j in row[:REC3D_TOP_PER_NEURON]:
+            edges_3d.append((j, i, float(W_rec_np[i, j])))
     edges_3d.sort(key=lambda e: -abs(e[2]))
     rec_edges_3d = []
-    if edges_3d:
-        abs_ws = [abs(e[2]) for e in edges_3d]
-        w_min, w_max = min(abs_ws), max(abs_ws)
-        for src, tgt, w in edges_3d[:TOP_REC_EDGES_3D]:
-            alpha = (abs(w) - w_min) / (w_max - w_min + 1e-8)
-            rec_edges_3d.append([src, tgt, round(w, 4), round(float(alpha), 3)])
+    n_top = len(edges_3d)
+    for i, (src, tgt, w) in enumerate(edges_3d):
+        alpha = 1.0 - i / (n_top - 1) if n_top > 1 else 1.0
+        rec_edges_3d.append([src, tgt, round(w, 4), round(alpha, 3)])
 
     return {
         "col_x": [float(pos_col[i][0]) for i in range(N)],
@@ -728,6 +764,16 @@ def game_loop(state):
 # ============================================================
 # 5. HTTP 服务器
 # ============================================================
+class QuietThreadingHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)):
+            return   # 客户端断开（Windows 常见 WinError 10053），静音
+        super().handle_error(request, client_address)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "BrainVisualizer/1.0"
 
@@ -784,10 +830,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_init(self, qs):
         model_key = (qs.get("model", [""])[0] or "").strip()
-        path = resolve_model_path(model_key)
         with state.cond:
-            if os.path.abspath(path) != state.model_path:
-                state.load_state_raw(path, key=model_key or None)
+            # 带 ?model= 才切换模型；裸 /api/init 只返回当前状态（避免意外重置回默认模型）
+            if model_key:
+                path = resolve_model_path(model_key)
+                if os.path.abspath(path) != state.model_path:
+                    state.load_state_raw(path, key=model_key)
             payload = state.init_payload
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -887,7 +935,7 @@ def main():
     port = args.port
     for _ in range(20):
         try:
-            httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+            httpd = QuietThreadingHTTPServer(("127.0.0.1", port), Handler)
             httpd.daemon_threads = True
             break
         except OSError:

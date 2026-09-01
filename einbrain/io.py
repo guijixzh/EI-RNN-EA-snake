@@ -43,29 +43,32 @@ def save_brain_state(brain, use_half=True):
 
     掩码转 uint8，权重转 fp16（进化噪声量级远大于 fp16 精度）；最优模型
     单独用 fp32 全精度保存。
+
+    注意：所有张量均 clone——fp32 路径下 .to(同 dtype) 不拷贝，若不克隆，
+    返回的 dict 会与 brain 参数共享存储（快照/锚定随训练原地漂移）。
     """
     dtype = torch.float16 if use_half else torch.float32
     with torch.no_grad():
         return {
             'N': brain.N,
-            'M_in': brain.M_in.to(torch.uint8),
-            'M_rec': brain.M_rec.to(torch.uint8),
-            'M_out': brain.M_out.to(torch.uint8),
-            'W_in': brain.W_in.data.to(dtype),
-            'W_rec': brain.W_rec.data.to(dtype),
-            'W_out': brain.W_out.data.to(dtype),
-            'b_out': brain.b_out.data.to(dtype),
-            'tau_e_init': brain.tau_e_init.data.to(dtype),
-            'w_ei': brain.w_ei.data.to(dtype),
-            'w_ie': brain.w_ie.data.to(dtype),
-            'W_hormone1': brain.W_hormone1.data.to(dtype),
-            'b_hormone1': brain.b_hormone1.data.to(dtype),
-            'W_excit': brain.W_excit.data.to(dtype),
-            'b_excit': brain.b_excit.data.to(dtype),
-            'W_inhib': brain.W_inhib.data.to(dtype),
-            'b_inhib': brain.b_inhib.data.to(dtype),
-            'V': brain.V.data.to(dtype),
-            'b_v': brain.b_v.data.to(dtype),
+            'M_in': brain.M_in.to(torch.uint8).clone(),
+            'M_rec': brain.M_rec.to(torch.uint8).clone(),
+            'M_out': brain.M_out.to(torch.uint8).clone(),
+            'W_in': brain.W_in.data.to(dtype).clone(),
+            'W_rec': brain.W_rec.data.to(dtype).clone(),
+            'W_out': brain.W_out.data.to(dtype).clone(),
+            'b_out': brain.b_out.data.to(dtype).clone(),
+            'tau_e_init': brain.tau_e_init.data.to(dtype).clone(),
+            'w_ei': brain.w_ei.data.to(dtype).clone(),
+            'w_ie': brain.w_ie.data.to(dtype).clone(),
+            'W_hormone1': brain.W_hormone1.data.to(dtype).clone(),
+            'b_hormone1': brain.b_hormone1.data.to(dtype).clone(),
+            'W_excit': brain.W_excit.data.to(dtype).clone(),
+            'b_excit': brain.b_excit.data.to(dtype).clone(),
+            'W_inhib': brain.W_inhib.data.to(dtype).clone(),
+            'b_inhib': brain.b_inhib.data.to(dtype).clone(),
+            'V': brain.V.data.to(dtype).clone(),
+            'b_v': brain.b_v.data.to(dtype).clone(),
         }
 
 
@@ -84,6 +87,9 @@ def load_brain_state(state, cfg):
     new.obs_dim = cfg.OBS_DIM
     new.action_dim = cfg.ACTION_DIM
     new.train_hormone = bool(getattr(cfg, 'TRAIN_HORMONE_NET', False))
+
+    # 缓存 buffer 跟随状态张量的设备（PPO GPU 训练时快照往返不换设备）
+    _dev = state['W_in'].device if torch.is_tensor(state['W_in']) else torch.device('cpu')
 
     new.M_in = state['M_in'].float()
     new.M_rec = state['M_rec'].float()
@@ -107,15 +113,15 @@ def load_brain_state(state, cfg):
     new.V = nn.Parameter(state.get('V', torch.zeros(new.N)).float())
     new.b_v = nn.Parameter(state.get('b_v', torch.zeros(1)).float())
 
-    new.register_buffer('hormone_excit', torch.zeros(new.N))
-    new.register_buffer('hormone_inhib', torch.zeros(new.N))
-    new.register_buffer('short_term_state', torch.zeros(new.N))
-    new.register_buffer('consecutive_counts', torch.zeros(new.action_dim))
-    new.register_buffer('last_excit_cmd', torch.zeros(new.N))
-    new.register_buffer('last_inhib_cmd', torch.zeros(new.N))
-    new.register_buffer('W_rec_eff', torch.zeros(new.N, new.N))
-    new.register_buffer('W_out_eff', torch.zeros(new.action_dim, new.N))
-    new.register_buffer('M_norm', torch.zeros(new.N, new.N))
+    new.register_buffer('hormone_excit', torch.zeros(new.N, device=_dev))
+    new.register_buffer('hormone_inhib', torch.zeros(new.N, device=_dev))
+    new.register_buffer('short_term_state', torch.zeros(new.N, device=_dev))
+    new.register_buffer('consecutive_counts', torch.zeros(new.action_dim, device=_dev))
+    new.register_buffer('last_excit_cmd', torch.zeros(new.N, device=_dev))
+    new.register_buffer('last_inhib_cmd', torch.zeros(new.N, device=_dev))
+    new.register_buffer('W_rec_eff', torch.zeros(new.N, new.N, device=_dev))
+    new.register_buffer('W_out_eff', torch.zeros(new.action_dim, new.N, device=_dev))
+    new.register_buffer('M_norm', torch.zeros(new.N, new.N, device=_dev))
 
     new.baseline = None
 

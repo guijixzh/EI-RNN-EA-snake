@@ -330,3 +330,169 @@ class RaySnakeEnv(SnakeEnv):
         obs[24 + 4] = np.sqrt(len(self.body)/self.grid_size)
 
         return obs
+
+
+# ==================== ProjSnakeEnv：test7b 32proj 观测的精确 CPU 复刻 ====================
+#
+# 与 RaySnakeEnv 的关键差异（均为 test7b BatchedSnakeEnv._obs32/step 的原始语义）：
+#     - 食物 8 扇区为投影式连续感知（恒可见，不可遮挡）：
+#       channel_i = K * max(0, v·û_i) / |v|²，K=OBS_FOOD_SCALE=8
+#     - 自身/障碍扇区幅度 ×8（OBS_SELF_SCALE / OBS_OBSTACLE_SCALE），
+#       且障碍块整体（含 ch28 的 sqrt(len/G) 身后约定）在填充后再乘缩放
+#     - 饿死阈值 steps_wo_food > STARVE_SLOPE*len + 20（斜率默认 3）
+class ProjSnakeEnv(SnakeEnv):
+    # DIRS 顺序与 test7b _make_dirs 一致：0:右 1:下 2:左 3:上（(dr, dc)）
+    DIRS = ((0, 1), (1, 0), (0, -1), (-1, 0))
+
+    def __init__(self, grid_size=10, max_steps=500, cfg=None):
+        super().__init__(grid_size, max_steps, cfg)
+        self.obs_dim = 32
+
+    def sees_food(self, obs):
+        return True   # 投影观测下食物恒可见
+
+    def _food_cell_rand(self, avoid):
+        """随机选一个不在 avoid 集合中的格子（复刻 test7b 重试 31 次 + 回退语义）。"""
+        G = self.grid_size
+        for _ in range(32):
+            cand = (random.randint(0, G - 1), random.randint(0, G - 1))
+            if cand not in avoid:
+                return cand
+        return min(((r, c) for r in range(G) for c in range(G)),
+                   key=lambda cell: (cell in avoid, cell))   # 无空格回退最小自由格
+
+    def reset(self, dir_idx=None, food=None):
+        """dir_idx/food 可显式给定（等价性对拍用），默认随机。"""
+        G = self.grid_size
+        self.dir_idx = random.randint(0, 3) if dir_idx is None else int(dir_idx)
+        d = self.DIRS[self.dir_idx]
+        self.head = (G // 2, G // 2)
+        self.body = [self.head, (self.head[0] - d[0], self.head[1] - d[1])]
+        self.body_len = 2
+        if food is not None:
+            self.food = (int(food[0]), int(food[1]))
+        else:
+            self.food = self._food_cell_rand(set(self.body))
+        self.food_count = 0
+        self.steps = 0
+        self.steps_without_food = 0
+        self.died = 0                     # 0存活 1撞墙 2撞己 3饿死（test7b 语义）
+        window = max(2, int(getattr(self.cfg, 'LOITER_WINDOW', 12))) if self.cfg else 12
+        self.head_history = collections.deque(maxlen=window)
+        self.loiter_now = False
+        return self._get_obs()
+
+    def _d8(self):
+        """8 相对方向 [前, 左前, 左, 左后, 后, 右后, 右, 右前]，与 test7b _obs32 一致。"""
+        d = self.DIRS[self.dir_idx]
+        left = self.DIRS[(self.dir_idx + 3) % 4]
+        right = self.DIRS[(self.dir_idx + 1) % 4]
+        return [d, (d[0] + left[0], d[1] + left[1]), left,
+                (left[0] - d[0], left[1] - d[1]), (-d[0], -d[1]),
+                (right[0] - d[0], right[1] - d[1]), right,
+                (d[0] + right[0], d[1] + right[1])]
+
+    def _get_obs(self, will_eat=False):
+        cfg = self.cfg
+        G = self.grid_size
+        obs = np.zeros(32, dtype=np.float32)
+
+        # --- [0:4] 蛇首方向 one-hot ---
+        obs[self.dir_idx] = 1.0
+
+        # --- [4:8] 蛇尾方向 one-hot（末节指向其前一节的移动朝向）---
+        tail = self.body[self.body_len - 1]
+        prev = self.body[max(self.body_len - 2, 0)]
+        td = (prev[0] - tail[0], prev[1] - tail[1])
+        if td in self.DIRS:
+            obs[4 + self.DIRS.index(td)] = 1.0
+
+        # --- [8:16] 食物 8 扇区投影（恒可见）---
+        vr = self.food[0] - self.head[0]
+        vc = self.food[1] - self.head[1]
+        d2 = max(vr * vr + vc * vc, 1.0)
+        k_scale = float(getattr(cfg, 'OBS_FOOD_SCALE', 1.0)) if cfg else 1.0
+        for i, (dx, dy) in enumerate(self._d8()):
+            norm = math.sqrt(dx * dx + dy * dy)
+            dot = (vr * dx + vc * dy) / norm
+            obs[8 + i] = max(dot, 0.0) / d2 * k_scale
+
+        # --- [16:24] 自身 8 扇区距离倒数（射线扫身体，不含蛇头 seg0）---
+        body_set = set(self.body[1:self.body_len])
+        for i, (dx, dy) in enumerate(self._d8()):
+            dist = None
+            for k in range(1, G + 1):
+                r, c = self.head[0] + dx * k, self.head[1] + dy * k
+                if not (0 <= r < G and 0 <= c < G):
+                    break
+                if (r, c) in body_set:
+                    dist = k
+                    break
+            obs[16 + i] = 1.0 / dist if dist is not None else 0.0
+        k_self = float(getattr(cfg, 'OBS_SELF_SCALE', 1.0)) if cfg else 1.0
+        obs[16:24] *= k_self
+
+        # --- [24:32] 障碍 8 扇区距离倒数（墙或身体；走廊畅通时 dist=G）---
+        for i, (dx, dy) in enumerate(self._d8()):
+            dist = G
+            for k in range(1, G + 1):
+                r, c = self.head[0] + dx * k, self.head[1] + dy * k
+                if not (0 <= r < G and 0 <= c < G):
+                    dist = k
+                    break
+                if (r, c) in body_set:
+                    dist = k
+                    break
+            obs[24 + i] = 1.0 / dist
+        obs[28] = math.sqrt(max(self.body_len, 1) / G)
+        k_obs = float(getattr(cfg, 'OBS_OBSTACLE_SCALE', 1.0)) if cfg else 1.0
+        obs[24:32] *= k_obs
+
+        return obs
+
+    def step(self, action):
+        """执行动作。返回 (next_obs, ate, done, truncated)。
+
+        done = 撞墙/撞己（died=1/2）；truncated = 饿死(died=3) 或超步。
+        """
+        cfg = self.cfg
+        G = self.grid_size
+        if action == 1:
+            self.dir_idx = (self.dir_idx + 3) % 4
+        elif action == 2:
+            self.dir_idx = (self.dir_idx + 1) % 4
+        d = self.DIRS[self.dir_idx]
+
+        self.steps += 1
+        self.steps_without_food += 1
+
+        next_head = (self.head[0] + d[0], self.head[1] + d[1])
+        will_eat = (next_head == self.food)
+        # 撞尾判定：吃到食物时尾巴不动（全身判定），否则尾巴让位（排除末节）
+        body_check = self.body[:self.body_len] if will_eat else self.body[:self.body_len - 1]
+        out_b = not (0 <= next_head[0] < G and 0 <= next_head[1] < G)
+        if out_b or next_head in body_check:
+            self.died = 1 if out_b else 2
+            return self._get_obs(will_eat), False, True, False
+
+        self.body.insert(0, next_head)
+        self.head = next_head
+        ate = will_eat
+        if ate:
+            self.body_len = min(self.body_len + 1, G * G)
+            self.steps_without_food = 0
+            self.food = self._food_cell_rand(set(self.body[:self.body_len]))
+        else:
+            self.body.pop()
+
+        self.loiter_now = self._check_loiter(next_head)
+
+        slope = float(getattr(cfg, 'STARVE_SLOPE', 3.0)) if cfg else 3.0
+        starve = self.steps_without_food > slope * self.body_len + 20
+        if starve:
+            self.died = 3
+            return self._get_obs(), ate, False, True
+        if self.steps >= self.max_steps:
+            return self._get_obs(), ate, False, True
+
+        return self._get_obs(), ate, False, False

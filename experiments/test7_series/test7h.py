@@ -136,6 +136,11 @@ class Config:
     IMITATION_W = 0.0           # 0=关（默认）；建议验证 2.0
     TEACHER_STARVE = False      # 教师饿死感知捷径（预算不足时放宽不变量强行追食）
 
+    # --- 追食重塑形（C 线 28 瓶颈对策：模仿 90 代稀释了追食回路）---
+    # fitness += PROX_W·prox（prox=指标列[4]，存活期间 1/食物欧氏距离均值，
+    # 每步已测、量程 ~0.08-1）。稠密食物接近梯度，重装被模仿稀释的追食回路。
+    PROX_W = 0.0                # 0=关（默认）
+
     # --- 单侧转弯判死（保持关闭：早期随机个体普遍摇头，判罚干扰初期筛选）---
     ONE_SIDED_TURN_DEATH = False
 
@@ -264,6 +269,9 @@ def _fitness_econ(m, cfg):
     iw = float(getattr(cfg, 'IMITATION_W', 0.0))
     if iw > 0 and len(m) > 12:
         fit += iw * (1.0 - float(m[12]))       # 模仿项：mismatch 率惩罚
+    pw = float(getattr(cfg, 'PROX_W', 0.0))
+    if pw > 0:
+        fit += pw * float(m[4])                # 追食塑形：接近食物的稠密梯度
     return fit
 
 
@@ -377,9 +385,14 @@ class VectorCycleTeacher:
         valid = torch.arange(body.shape[1], device=dev)[None, :] < body_len[:, None]
         tail_flat = body[ar, (body_len - 1).clamp(min=0), 0] * G + \
             body[ar, (body_len - 1).clamp(min=0), 1]
-        occ = torch.zeros(B, G * G, dtype=torch.bool, device=dev)
-        occ.scatter_(1, flat.clamp(max=G * G - 1), valid)
-        occ.scatter_(1, tail_flat.unsqueeze(1), False)
+        occ = torch.zeros(B, G * G, dtype=torch.long, device=dev)
+        # scatter_add_：填充行重复写同索引（含 0 号格）时求和而非竞争写，
+        # 保证确定性（scatter_ 在 CUDA 上重复索引为 last-write-wins 不确定）
+        occ.scatter_add_(1, flat.clamp(max=G * G - 1), valid.long())
+        occ[:, :] = (occ > 0).to(torch.long)
+        occ.scatter_(1, tail_flat.unsqueeze(1), torch.zeros(B, 1, dtype=torch.long,
+                                                             device=dev))
+        occ = occ > 0
         nbr_flat = nbr_c[:, :, 0] * G + nbr_c[:, :, 1]
         n_occ = occ.gather(1, nbr_flat)                            # [B,4]
         n_food = (nbr[:, :, 0] == food[:, None, 0]) & (nbr[:, :, 1] == food[:, None, 1])
@@ -1922,6 +1935,8 @@ def main():
                     help='te-配额精英数（默认 0=关；行为学 B5 对策）')
     ap.add_argument('--imitation-w', type=float, default=None,
                     help='模仿引导权重（默认 0=关；建议 2.0）')
+    ap.add_argument('--prox-w', type=float, default=None,
+                    help='追食塑形权重（默认 0=关）')
     ap.add_argument('--stage1-eps', type=int, default=None,
                     help='阶段1 局数 K1（默认 3）')
     ap.add_argument('--stage2-eps', type=int, default=None,
@@ -1986,6 +2001,8 @@ def main():
         cfg.TE_ELITE = args.te_elite
     if args.imitation_w is not None:
         cfg.IMITATION_W = args.imitation_w
+    if args.prox_w is not None:
+        cfg.PROX_W = args.prox_w
     if args.name:
         cfg.CHECKPOINT_PATH = f'test7h_{args.name}_checkpoint.pth'
         cfg.BEST_MODEL_PATH = f'test7h_{args.name}_best_model.pth'
