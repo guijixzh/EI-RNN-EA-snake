@@ -58,6 +58,39 @@ SiNNtry/
 | `docs/test14_experiment_log.md` | 期相激素 v1：局内动态调制 | 已结题（G1-NULL：精英通胀非能力增益） |
 | `docs/test15_experiment_log.md` | 观测增维 32→40（信息直供 + Phase A 标定 + 温启动 A/B） | 活跃 |
 | `docs/test16b_experiment_log.md` | 评估提速 fast-eval + 阶段2 对半精评；§6 320 代终局 1000 局基准（best 62.7 略超 7b 61.4）、§7 einbrain 16 系列可视化、§8 16b vs 7b 结构对比（同连接预算/随机拓扑 vs 稠密循环）、§9 扇入扩容 K=16→32 种子续训（`experiments/expand_fanin.py`，零权补槽严格等价 + 三道自检门） | 活跃 |
+| `docs/standard_implementation_log.md` | **snake_std 标准实现程序**：三观测环境 × 多适应度 × 多筛选 × 激素/轮换/池/固定地图开关；14 组自检 + 等价门（默认=16b 逐位） | 活跃（标准入口） |
+
+## 快速上手（snake_std 标准实现，推荐入口）
+
+以 test16b 为基座的单文件标准程序，四种能力面全由 CLI 选择（完整矩阵见
+`docs/standard_implementation_log.md`）：
+
+```bash
+# 默认 = 16b 行为（obs40 + econ v7/LCB + 二阶段+对半精评 + fast-eval）
+python snake_std.py --gens 320
+
+# 三种观测环境：40tailflood1（默认）/ 32ego1（test12）/ 32proj7b（test7b）
+python snake_std.py --obs 32ego
+python snake_std.py --obs 32proj
+
+# 适应度公式：econ 乘法式（默认）/ simple 最简 / tuple 词典序 / 鲁棒最小值
+python snake_std.py --fit-mode simple
+python snake_std.py --robust-eval 2
+
+# 筛选方案：二阶段+对半精评（默认）/ 单阶段 / 不精评 / 自适应 K2
+python snake_std.py --no-stage2
+
+# 系统开关：激素系统 / 训练轮换 / 感觉-运动池 / 固定地图
+python snake_std.py --train-hormone --cycle-pattern "G1,G2,G3"
+python snake_std.py --pools
+python snake_std.py --fixed-map
+
+# 断点续训（16 系列断点互认）与播放
+python snake_std.py --resume-pop <16系列checkpoint.pth>
+python snake_std.py --play
+```
+
+自检（14 组）一键冒烟：`run_snake_std_smoke.bat`。
 
 ## 快速上手（einbrain 包）
 

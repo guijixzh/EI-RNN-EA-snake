@@ -1,0 +1,16 @@
+@echo off
+rem snake_std 标准实现冒烟验证：自检（14 组）+ 3 代小规模端到端 + 三观测环境
+cd /d "%~dp0"
+if not defined PY set PY=python
+
+echo [1/5] selfcheck（适应度/CRN/稀疏等价/观测等价/激素/鲁棒/池/固定地图）...
+%PY% -X utf8 -u snake_std.py --selfcheck  2>&1 | tee logs\snake_std_selfcheck.log
+echo [2/5] smoke 默认（=16b 行为，obs40）...
+%PY% -X utf8 -u snake_std.py --smoke --name sm_default  2>&1 | tee logs\snake_std_smoke_default.log
+echo [3/5] smoke --obs 32ego ...
+%PY% -X utf8 -u snake_std.py --smoke --name sm_ego32 --obs 32ego  2>&1 | tee logs\snake_std_smoke_ego32.log
+echo [4/5] smoke --obs 32proj ...
+%PY% -X utf8 -u snake_std.py --smoke --name sm_proj32 --obs 32proj  2>&1 | tee logs\snake_std_smoke_proj32.log
+echo [5/5] smoke 激素+轮换 ...
+%PY% -X utf8 -u snake_std.py --smoke --name sm_hormone --train-hormone --cycle-pattern G1,G2,G3  2>&1 | tee logs\snake_std_smoke_hormone.log
+pause
