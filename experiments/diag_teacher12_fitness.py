@@ -1,7 +1,7 @@
 # 教师解法器 vs best 模型：同库同批全套关键数值 + 适应度逐项分解。
 # 目的：检验 test12 适应度设计（food + eff + te + 孤岛）各 Term 的量级与
 # 饱和/区分度是否合理（以 40/40 通关的教师解法器为"物理可达上界"参照）。
-# 用法: python experiments/diag_teacher12_fitness.py [--n 40] [--model test12_econ_best_model.pth]
+# 用法: python experiments/diag_teacher12_fitness.py [--n 40] [--model artifacts/test12/test12_econ_best_model.pth]
 import argparse
 import os
 import sys
@@ -55,7 +55,7 @@ def summarize(name, rows, cfg):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--n', type=int, default=40)
-    ap.add_argument('--model', default='test12_econ_best_model.pth')
+    ap.add_argument('--model', default='artifacts/test12/test12_econ_best_model.pth')
     args = ap.parse_args()
 
     cfg = t12.Config()

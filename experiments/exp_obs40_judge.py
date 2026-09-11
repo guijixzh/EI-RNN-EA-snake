@@ -27,9 +27,9 @@ import test15 as t15   # noqa: E402
 import exp_phase_diagnostic as epd   # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-A1_CKPT = os.path.join(ROOT, 'test15_b1_a1_latest_gen_best.pth')
-C0_CKPT = os.path.join(ROOT, 'test14_ab1_c0_latest_gen_best.pth')
-HIST_A1 = os.path.join(ROOT, 'test15_b1_a1_history.json')
+A1_CKPT = os.path.join(ROOT, 'artifacts/test15/test15_b1_a1_latest_gen_best.pth')
+C0_CKPT = os.path.join(ROOT, 'artifacts/test14/test14_ab1_c0_latest_gen_best.pth')
+HIST_A1 = os.path.join(ROOT, 'artifacts/test15/test15_b1_a1_history.json')
 BASE = json.load(open(os.path.join(ROOT, 'results', 'phase_diagnostic.json'),
                       encoding='utf-8'))
 

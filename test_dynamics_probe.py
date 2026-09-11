@@ -93,7 +93,7 @@ def run_probe_v4(model_path, warmup=800, follow_up=400):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="test7b_latest_gen_best.pth")
+    ap.add_argument("--model", default="artifacts/test7b/test7b_latest_gen_best.pth")
     ap.add_argument("--warmup", type=int, default=800, help="热身步数，让蛇变长")
     ap.add_argument("--follow_up", type=int, default=400, help="注入扰动后的追踪步数")
     args = ap.parse_args()

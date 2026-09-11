@@ -886,7 +886,7 @@ def pick_writer(out_path, fps, W, H):
 # ==========================================
 def main():
     ap = argparse.ArgumentParser(description='win 模型通关过程视频化 v3')
-    ap.add_argument('--model', default='16c_cheat7b_win_model.pth')
+    ap.add_argument('--model', default='artifacts/test16c_cheat7b/16c_cheat7b_win_model.pth')
     ap.add_argument('--out', default='win_run_1080p_v3.mp4')
     ap.add_argument('--min-food', type=int, default=98,
                     help='门禁：回放最终食物数低于该值拒绝渲染（高效版传 97）')

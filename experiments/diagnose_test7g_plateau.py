@@ -15,7 +15,7 @@
 #
 # 对象：test7g_econ_best_model.pth   二阶段续训 best（40 平台产物）
 #       test7g_econ_best_100gen.pth  一阶段 economy best（30 平台产物，对照）
-#       test7b_best_model.pth        7b 67 分模型（"摇头但高分"基线，对照）
+#       artifacts/test7b/test7b_best_model.pth        7b 67 分模型（"摇头但高分"基线，对照）
 #       test7g_econ_checkpoint copy.pth  读 next_gen/config 确认续训参数 + 精英 top64
 # 产出：results/test7g_plateau_diagnosis.json + .png
 # ==========================================
@@ -365,7 +365,7 @@ def main():
     models = [
         ('7g_phase2_best(40平台)', 'test7g_econ_best_model.pth'),
         ('7g_phase1_econ(30平台)', 'test7g_econ_best_100gen.pth'),
-        ('7b_67分基线', 'test7b_best_model.pth'),
+        ('7b_67分基线', 'artifacts/test7b/test7b_best_model.pth'),
     ]
     per_model_rows = {}
     for tag, fn in models:

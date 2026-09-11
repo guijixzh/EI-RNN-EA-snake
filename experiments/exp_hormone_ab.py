@@ -29,7 +29,7 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = sys.executable
-MIGRATE_FROM = os.path.join(ROOT, 'test12_econ_latest_gen_best.pth')
+MIGRATE_FROM = os.path.join(ROOT, 'artifacts/test12/test12_econ_latest_gen_best.pth')
 
 ARMS = {
     'c0': ['--arm', 'C0'],

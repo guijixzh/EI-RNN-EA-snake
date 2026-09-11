@@ -126,7 +126,7 @@ def main():
     ap = argparse.ArgumentParser(description='test16b 模型 1000 局基准（fast-eval 扫描）')
     ap.add_argument('--models', nargs='+', default=[
         os.path.join(ROOT, 'test16b_simp_best_model.pth'),
-        os.path.join(ROOT, 'test16b_simp_latest_gen_best.pth'),
+        os.path.join(ROOT, 'artifacts', 'test16b', 'test16b_simp_latest_gen_best.pth'),
     ], help='模型文件路径（默认 simp best + latest_gen_best）')
     ap.add_argument('--games', type=int, default=1000)
     ap.add_argument('--device', default=None)

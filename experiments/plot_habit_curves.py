@@ -2,7 +2,7 @@
 # 每局逐存活步记录：edge_pref（外环-内部占用差）、conn（蛇身外空间单连通 0/1，
 # 严格含尾）、straight（累计 1−转弯/步数）。死亡即曲线终止。
 # 输出: results/habit_curves.png（2 行×3 列：上=模型 下=教师）
-# 用法: python experiments/plot_habit_curves.py [--n 10] [--model test12_econ_best_model.pth]
+# 用法: python experiments/plot_habit_curves.py [--n 10] [--model artifacts/test12/test12_econ_best_model.pth]
 import argparse
 import os
 import sys
@@ -77,7 +77,7 @@ def run_tracked(model_pop=None, teacher=None, cfg=None, bank=None, B=0, dev=None
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--n', type=int, default=10)
-    ap.add_argument('--model', default='test12_econ_best_model.pth')
+    ap.add_argument('--model', default='artifacts/test12/test12_econ_best_model.pth')
     ap.add_argument('--out', default='results/habit_curves.png')
     args = ap.parse_args()
 

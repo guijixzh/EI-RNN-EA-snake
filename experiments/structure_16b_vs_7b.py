@@ -2,8 +2,8 @@
 
 对象（同代最优个体、各自 1000 局实测过的模型）：
     - test16b_simp_best_model.pth        N=1024, rec_idx/rec_w K=16, obs=40
-    - test16b_simp_latest_gen_best.pth   同上（末代）
-    - test7b_latest_gen_best.pth         N=256,  稠密 W_rec/M_rec,     obs=32（1000 局 mean 61.35）
+    - artifacts/test16b/test16b_simp_latest_gen_best.pth   同上（末代）
+    - artifacts/test7b/test7b_latest_gen_best.pth         N=256,  稠密 W_rec/M_rec,     obs=32（1000 局 mean 61.35）
 
 指标分层：
     A 规模与密度：N、rec 边数/密度、有效（|W|>0.01）边占比、输入/输出连接度
@@ -33,8 +33,8 @@ from einbrain import io as eio
 
 MODELS = {
     '16b_best': os.path.join(ROOT, 'test16b_simp_best_model.pth'),
-    '16b_latest': os.path.join(ROOT, 'test16b_simp_latest_gen_best.pth'),
-    '7b_latest': os.path.join(ROOT, 'test7b_latest_gen_best.pth'),
+    '16b_latest': os.path.join(ROOT, 'artifacts/test16b/test16b_simp_latest_gen_best.pth'),
+    '7b_latest': os.path.join(ROOT, 'artifacts/test7b/test7b_latest_gen_best.pth'),
 }
 
 EFF_W_THR = 0.01     # |W|>该阈值视为有效边（两模型统一口径）

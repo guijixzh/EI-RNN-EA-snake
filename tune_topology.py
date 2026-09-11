@@ -85,8 +85,8 @@ def main():
     import render_win_video as rwv
 
     ap = argparse.ArgumentParser(description='拓扑弹簧布局调参（快速单图）')
-    ap.add_argument('--model', default='16c_cheat7b_win_model.pth')
-    ap.add_argument('--out', default='topology_tune.png')
+    ap.add_argument('--model', default='artifacts/test16c_cheat7b/16c_cheat7b_win_model.pth')
+    ap.add_argument('--out', default='results/topology_tune.png')
     ap.add_argument('--seed', type=int, default=None)
     ap.add_argument('--iters', type=int, default=None)
     ap.add_argument('--t0', type=float, default=None)

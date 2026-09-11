@@ -97,7 +97,7 @@ def main():
 
     # ---- 局面：7h / 7b / 参考 ----
     st7h, cfg7h = load_brain('test7h_econ_best_model.pth')
-    st7b, cfg7b = load_brain('test7b_best_model.pth')
+    st7b, cfg7b = load_brain('artifacts/test7b/test7b_best_model.pth')
 
     print('[参考] CycleSolver（免钟）...')
     rlogs = rollout_reference(banks, starve_slope=1e9, max_steps=30000)

@@ -73,7 +73,7 @@ def main():
     ap = argparse.ArgumentParser(description='供体脑注入全种群 checkpoint')
     ap.add_argument('--checkpoint', default='test7g_econ_checkpoint copy.pth',
                     help='源全种群 checkpoint（默认 7g 续训断点副本）')
-    ap.add_argument('--donor', default='test7b_best_model.pth', help='供体模型文件')
+    ap.add_argument('--donor', default='artifacts/test7b/test7b_best_model.pth', help='供体模型文件')
     ap.add_argument('--copies', type=int, default=8, help='注入副本数（写入尾部子代行）')
     ap.add_argument('--out', default='test7h_seed_checkpoint.pth', help='输出 checkpoint 路径')
     ap.add_argument('--eval', action='store_true', help='注入前在目标 run 口径下评估供体')

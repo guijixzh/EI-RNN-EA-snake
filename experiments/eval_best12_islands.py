@@ -1,5 +1,5 @@
 # 评估 test12 best 模型：N 局终局报告 + 每局孤岛曲线（吃食采样点 reach_ratio）
-# 用法: python experiments/eval_best12_islands.py [--model test12_econ_best_model.pth] [--episodes 10]
+# 用法: python experiments/eval_best12_islands.py [--model artifacts/test12/test12_econ_best_model.pth] [--episodes 10]
 import argparse
 import os
 import sys
@@ -15,7 +15,7 @@ DEATH = {0: '存活(到步数上限)', 1: '撞墙', 2: '撞己', 3: '饿死'}
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--model', default='test12_econ_best_model.pth')
+    ap.add_argument('--model', default='artifacts/test12/test12_econ_best_model.pth')
     ap.add_argument('--episodes', type=int, default=10)
     ap.add_argument('--max-steps', type=int, default=100000)
     args = ap.parse_args()

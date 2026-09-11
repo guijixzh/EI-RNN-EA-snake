@@ -16,7 +16,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import test16c_cheat7b as sim
 
-MODEL = '16c_cheat7b_win_model.pth'
+MODEL = 'artifacts/test16c_cheat7b/16c_cheat7b_win_model.pth'
 N_STATE = 15
 N_PERM = 64
 S_IDX = 0

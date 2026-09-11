@@ -18,17 +18,26 @@ SiNNtry/
 │   ├── io.py           统一保存/加载，兼容三格式模型互作种子
 │   ├── deliberation.py K 帧思考
 │   └── vis.py          可视化
-├── test7b*.py        ★ 活跃实验线 1：GPU 进化冠军线（67 分）+ 基准脚本
-├── test12*.py        ★ 活跃实验线 2：ego 观测重写 + 适应度 v7（含 s1/s2 前缀跑产物）
+├── snake_std.py      ★ 标准实现程序（以 16b 为基座：三种观测环境 × 多适应度公式 ×
+│                       多筛选方案 × 激素/轮换等系统开关，详见 docs/standard_implementation_log.md）
+├── test7b*.py        活跃实验线 1（已归档产物）：GPU 进化冠军线（67 分）+ 基准脚本
+├── test12*.py        活跃实验线 2（已归档产物）：ego 观测重写 + 适应度 v7
 ├── test14.py         激素实验线（期相激素 v1，已结题 G1-NULL；保留作 v2 基础）
-├── test15.py         ★ 活跃实验线 3：观测增维 32→40（钟压/尾四方位/三向7步洪水稀缺）
+├── test15.py         活跃实验线 3：观测增维 32→40（钟压/尾四方位/三向7步洪水稀缺）
+├── test16*.py        16 系列：稀疏固定扇入基因组（16→16a LCB/自适应K2→16b fast-eval/对半
+│                     精评→16c 池约束→16c_cheat7b 固定地图通关特训）
+├── test16b_simp_best_model.pth   ★ 当前基准模型（千局 62.67，略超 7b 61.35）
+├── artifacts/        ★ 实验产物归档（按世代分目录）：test7b/ test12/ test14/ test15/
+│                     test16/ test16a/ test16b/ test16c/ test16c_cheat7b/
+│                     存放各世代 *_best_model.pth / *_history.json|png 等
+├── media/            成品视频（不入库）
 ├── experiments/      历史实验归档：test1..test8 及分析脚本平铺；
 │                     主题子目录 test7_series/（test7→7h）、test10_lunar/（含云端部署包）、
 │                     test11/、test13_ppo/
 ├── deploy_test12/    test12 的 AutoDL 云端部署包
 ├── deploy_test15/    test15 观测增维的 AutoDL 云端部署包（cold1 断点续训）
 ├── bench/             性能基准（列数扫描 / A-B 对比 / 加速比）
-├── tools/             实时脑活动可视化服务器（brain_visualizer + static）
+├── tools/             实时脑活动可视化服务器（brain_visualizer + static，模型扫描覆盖根目录与 artifacts/）
 ├── models/            训练好的模型权重（test4b/5/5a/5d/6/7/8 等，含早期 LSTM 预训练）
 ├── results/           训练曲线/基准/诊断等数据与图
 ├── logs/              运行日志

@@ -24,7 +24,7 @@ import test12 as t12   # noqa: E402
 import test14 as t14   # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CKPT = os.path.join(ROOT, 'test12_econ_latest_gen_best.pth')
+CKPT = os.path.join(ROOT, 'artifacts/test12/test12_econ_latest_gen_best.pth')
 B = 64          # 评估副本行数（同一底盘）
 E = 8           # CRN 局数
 GEN_TAG = 4242  # CRN 库种子标签（远离训练序列）

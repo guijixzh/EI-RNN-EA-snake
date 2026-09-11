@@ -53,6 +53,28 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 MODELS_DIR = os.path.join(REPO_ROOT, "models")
 DEFAULT_MODEL = os.path.join(MODELS_DIR, "test5a_best_model.pth")
 MODEL_FAST_PATH = os.path.join(MODELS_DIR, "test5d_best_model_33.pth")
+
+
+def find_model_file(fname):
+    """模型文件查找：根目录 → artifacts/<世代>/ → experiments/test7_series/（产物归档后统一兼容）"""
+    p = os.path.join(REPO_ROOT, fname)
+    if os.path.exists(p):
+        return p
+    hits = sorted(glob.glob(os.path.join(REPO_ROOT, "artifacts", "*", fname)))
+    if hits:
+        return hits[0]
+    hit = os.path.join(REPO_ROOT, "experiments", "test7_series", fname)
+    return hit if os.path.exists(hit) else p
+
+
+def scan_model_files(pattern):
+    """按通配符扫描根目录 + artifacts/*/ + experiments/test7_series/ 下的模型"""
+    hits = glob.glob(os.path.join(REPO_ROOT, pattern))
+    hits += glob.glob(os.path.join(REPO_ROOT, "artifacts", "*", pattern))
+    hits += glob.glob(os.path.join(REPO_ROOT, "experiments", "test7_series", pattern))
+    return sorted(set(hits))
+
+
 # 默认加载：优先最新版本的引擎模型（16b > 12 > 7g > 7d > 7c > 7b > 7a > 5a）
 DEFAULT_MODEL_KEY = next(
     (key for key, fname in [("16b", "test16b_simp_best_model.pth"),
@@ -62,7 +84,7 @@ DEFAULT_MODEL_KEY = next(
                             ("7c", "test7c_latest_gen_best.pth"),
                             ("7b", "test7b_best_model.pth"),
                             ("7a", "test7a_v5a_best_model.pth")]
-     if os.path.exists(os.path.join(REPO_ROOT, fname))), "5a")
+     if os.path.exists(find_model_file(fname))), "5a")
 
 TOP_REC_EDGES = 140      # 拓扑图中展示的递归边 top-K 条数
 REC3D_TOP_PER_NEURON = 10   # 3D 弹簧图：每个神经元保留自己最大权重的前 10 条输入边
@@ -236,14 +258,15 @@ def make_cfg_from_dict(cfg_dict):
 
 
 def available_models():
-    """模型下拉框枚举：内置 5a/fast/16b/12 + 自动扫描根目录 test7/12/16 系最优模型"""
+    """模型下拉框枚举：内置 5a/fast/16b/12 + 自动扫描根目录/artifacts/*/test7/12/16 系最优模型"""
     models = [("5a", "5a 最优 (256)"), ("fast", "5d 最优 (256)")]
     for key, label in [("16b", "16b 最优 (1024 稀疏)"), ("12", "12 最优 (256)")]:
-        if os.path.exists(os.path.join(REPO_ROOT, ENGINE_DEFAULT_FILE[key])):
+        if os.path.exists(find_model_file(ENGINE_DEFAULT_FILE[key])):
             models.append((key, label))
-    scanned = sorted(glob.glob(os.path.join(REPO_ROOT, "test16*_best*.pth"))) + \
-              sorted(glob.glob(os.path.join(REPO_ROOT, "test7*_best*.pth"))) + \
-              sorted(glob.glob(os.path.join(REPO_ROOT, "test12*_best*.pth")))
+    scanned = scan_model_files("test16*_best*.pth") + \
+              scan_model_files("test7*_best*.pth") + \
+              scan_model_files("test12*_best*.pth") + \
+              scan_model_files("16c_cheat7b_*model.pth")
     for p in scanned:
         name = os.path.basename(p)
         if name in (ENGINE_DEFAULT_FILE.get("16b"), ENGINE_DEFAULT_FILE.get("12")):
@@ -253,25 +276,25 @@ def available_models():
 
 
 def resolve_model_path(key):
-    """内置 key（5a/fast/7a/7b）→ 默认模型；其他 → 根目录文件名或绝对路径"""
+    """内置 key（5a/fast/7a/7b）→ 默认模型；其他 → 根目录/artifacts 文件名或绝对路径"""
     if key == "fast":
         return MODEL_FAST_PATH
     if key in ENGINE_DEFAULT_FILE:
-        fname = ENGINE_DEFAULT_FILE[key]
-        path = os.path.join(REPO_ROOT, fname)
+        path = find_model_file(ENGINE_DEFAULT_FILE[key])
         if os.path.exists(path):
             return path
         # 默认文件不存在 → 回落到扫描到的该引擎首个模型
-        cands = sorted(glob.glob(os.path.join(
-            REPO_ROOT, os.path.splitext(next(e.module_file for e in ENGINES
-                                             if e.name == key))[0] + "*_best*.pth")))
+        prefix = os.path.splitext(next(e.module_file for e in ENGINES
+                                       if e.name == key))[0]
+        cands = scan_model_files(prefix + "*_best*.pth") + \
+                scan_model_files(prefix + "*model*.pth")
         if cands:
             return cands[0]
         return path
     if key not in ("", "5a"):
         if os.path.isabs(key) and os.path.exists(key):
             return key
-        cand = os.path.join(REPO_ROOT, key)
+        cand = find_model_file(key)
         if os.path.exists(cand):
             return cand
     return DEFAULT_MODEL

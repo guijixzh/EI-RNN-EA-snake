@@ -28,7 +28,7 @@ import test16c_cheat7b as sim
 
 def main():
     ap = argparse.ArgumentParser(description='7b 原版随机地图并发评测 + 最佳盘视频')
-    ap.add_argument('--model', default='test7b_latest_gen_best.pth')
+    ap.add_argument('--model', default='artifacts/test7b/test7b_latest_gen_best.pth')
     ap.add_argument('--n-maps', type=int, default=1000)
     ap.add_argument('--out', default='7b_best_random_h264.mp4')
     ap.add_argument('--max-steps', type=int, default=3000)

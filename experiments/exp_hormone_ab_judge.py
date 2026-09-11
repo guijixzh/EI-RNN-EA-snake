@@ -29,7 +29,7 @@ E_EVAL = 12    # CRN 局数
 
 
 def load_hist(tag, arm):
-    p = os.path.join(ROOT, f'test14_{tag}_{arm}_history.json')
+    p = os.path.join(ROOT, f'artifacts/test14/test14_{tag}_{arm}_history.json')
     if not os.path.exists(p):
         return None
     with open(p, encoding='utf-8') as f:
@@ -121,7 +121,7 @@ def main():
 
     load_ok = None
     if gate_pass and not args.skip_ablation:
-        ckpt = os.path.join(ROOT, f'test14_{args.tag}_{best_arm}_latest_gen_best.pth')
+        ckpt = os.path.join(ROOT, f'artifacts/test14/test14_{args.tag}_{best_arm}_latest_gen_best.pth')
         if os.path.exists(ckpt):
             on = ablation_eval(ckpt, True, device)
             off = ablation_eval(ckpt, False, device)

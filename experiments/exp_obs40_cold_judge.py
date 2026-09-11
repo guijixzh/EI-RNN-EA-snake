@@ -19,9 +19,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import test15 as t15   # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-COLD_HIST = os.path.join(ROOT, 'test15_cold1_history.json')
-REF_HIST = os.path.join(ROOT, 'test12_econ_history.json')
-CKPT = os.path.join(ROOT, 'test15_cold1_latest_gen_best.pth')
+COLD_HIST = os.path.join(ROOT, 'artifacts/test15/test15_cold1_history.json')
+REF_HIST = os.path.join(ROOT, 'artifacts/test12/test12_econ_history.json')
+CKPT = os.path.join(ROOT, 'artifacts/test15/test15_cold1_latest_gen_best.pth')
 
 
 def load_hist(p):

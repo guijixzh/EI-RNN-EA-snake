@@ -25,7 +25,7 @@ import test12 as t12   # noqa: E402
 import test15 as t15   # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CKPT = os.path.join(ROOT, 'test12_econ_latest_gen_best.pth')
+CKPT = os.path.join(ROOT, 'artifacts/test12/test12_econ_latest_gen_best.pth')
 BLOCKS = [('head_abs', 0, 4), ('tail_abs', 4, 8), ('food', 8, 16),
           ('self', 16, 24), ('obst', 24, 32), ('clock', 32, 33),
           ('tailrel', 33, 37), ('flood', 37, 40)]

@@ -12,7 +12,7 @@
 #               → 交叉-变异 → 新一代；适应度公式 + 双训练过程曲线（最佳/精英/平均三线）
 #
 # 弹簧力学与结果视频拓扑面板同源（常数 import 自 render_win_video），初始位置 16×16 正方形。
-# 曲线数据 test16b_simp_history.json / 16c_cheat7b_history.json。
+# 曲线数据 artifacts/test16b/test16b_simp_history.json / artifacts/test16c_cheat7b/16c_cheat7b_history.json。
 # 用法：
 #   python make_intro_video.py --stills          # 关键帧 PNG（preview/intro_still_*.png）
 #   python make_intro_video.py                   # 全片 intro_1080p.mp4 → ffmpeg 转 intro_1080p_h264.mp4
@@ -1424,12 +1424,12 @@ def main():
     ap.add_argument('--fps', type=int, default=FPS)
     args = ap.parse_args()
 
-    CURVE_A = (load_curve('test16b_simp_history.json', 'best_food'),
-               load_curve('test16b_simp_history.json', 'elite_food'),
-               load_curve('test16b_simp_history.json', 'avg_food'))
-    CURVE_B = (load_curve('16c_cheat7b_history.json', 'best_food'),
-               load_curve('16c_cheat7b_history.json', 'elite_food'),
-               load_curve('16c_cheat7b_history.json', 'avg_food'))
+    CURVE_A = (load_curve('artifacts/test16b/test16b_simp_history.json', 'best_food'),
+               load_curve('artifacts/test16b/test16b_simp_history.json', 'elite_food'),
+               load_curve('artifacts/test16b/test16b_simp_history.json', 'avg_food'))
+    CURVE_B = (load_curve('artifacts/test16c_cheat7b/16c_cheat7b_history.json', 'best_food'),
+               load_curve('artifacts/test16c_cheat7b/16c_cheat7b_history.json', 'elite_food'),
+               load_curve('artifacts/test16c_cheat7b/16c_cheat7b_history.json', 'avg_food'))
     print(f'曲线A best {CURVE_A[0][0]:.1f}→{CURVE_A[0][-1]:.1f} | '
           f'曲线B best {CURVE_B[0][0]:.1f}→{CURVE_B[0][-1]:.1f}', flush=True)
     intro = Intro()

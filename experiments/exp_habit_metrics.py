@@ -1,7 +1,7 @@
 # E1：习惯三因素指标判别力验证（设计文档 experiments 方案）。
 # 教师解法器（全局回+捷径规划）理应表现出高 edge_pref / 高 conn；
 # best 模型（局部观测）作为对照。同库 40 局，指标方向与区分度即为判定。
-# 用法: python experiments/exp_habit_metrics.py [--n 40] [--model test12_econ_best_model.pth]
+# 用法: python experiments/exp_habit_metrics.py [--n 40] [--model artifacts/test12/test12_econ_best_model.pth]
 import argparse
 import os
 import sys
@@ -77,7 +77,7 @@ def report(name, r):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--n', type=int, default=40)
-    ap.add_argument('--model', default='test12_econ_best_model.pth')
+    ap.add_argument('--model', default='artifacts/test12/test12_econ_best_model.pth')
     args = ap.parse_args()
 
     cfg = t12.Config()

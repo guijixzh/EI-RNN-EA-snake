@@ -8,8 +8,8 @@
               等价性保障：GR=GC 时与原版环境逐步逐位对拍（见 --selfcheck）。
 
 模型：
-    7b = test7b_best_model.pth（10×10, N=256 稠密, 32proj）
-    12 = test12_econ_best_model.pth（10×10, N=256 稠密, 32ego1）
+    7b = artifacts/test7b/test7b_best_model.pth（10×10, N=256 稠密, 32proj）
+    12 = artifacts/test12/test12_econ_best_model.pth（10×10, N=256 稠密, 32ego1）
     （用户所称"12b"按 12 系最佳 test12_econ 理解）
 
 用法：
@@ -22,8 +22,8 @@ import torch
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 ENGINES = {
-    '7b': ('test7b.py', 'test7b_best_model.pth'),
-    '12': ('test12.py', 'test12_econ_best_model.pth'),
+    '7b': ('test7b.py', 'artifacts/test7b/test7b_best_model.pth'),
+    '12': ('test12.py', 'artifacts/test12/test12_econ_best_model.pth'),
 }
 SPACES = {
     '12x12': (12, 12),

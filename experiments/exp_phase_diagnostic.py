@@ -486,8 +486,8 @@ def main():
     print(f'device={device}  tiers={tiers}  n_spawn={n_spawn}  n_nat={n_nat}')
 
     subjects = {
-        'test12': (t12, os.path.join(ROOT, 'test12_econ_latest_gen_best.pth')),
-        'test7b': (t7b, os.path.join(ROOT, 'test7b_latest_gen_best.pth')),
+        'test12': (t12, os.path.join(ROOT, 'artifacts/test12/test12_econ_latest_gen_best.pth')),
+        'test7b': (t7b, os.path.join(ROOT, 'artifacts/test7b/test7b_latest_gen_best.pth')),
     }
 
     results = {}

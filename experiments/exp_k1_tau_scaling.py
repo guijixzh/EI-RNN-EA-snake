@@ -19,7 +19,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import test16c_cheat7b as sim
 
-MODEL = '16c_cheat7b_win_model.pth'
+MODEL = 'artifacts/test16c_cheat7b/16c_cheat7b_win_model.pth'
 N_EP = 16
 STEP_CAP = 3000
 BASELINE = 'K=5 τ原版 基线: food 总 971 mean 60.69 wins 1/16 死亡(己11/饿4)'

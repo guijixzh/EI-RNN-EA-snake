@@ -386,7 +386,7 @@ def main():
                                       died_starve=n_starve)
 
     for tag, path in (('7h_best', 'test7h_econ_best_model.pth'),
-                      ('7b_best', 'test7b_best_model.pth')):
+                      ('7b_best', 'artifacts/test7b/test7b_best_model.pth')):
         st, cfg, meta = load_model(path)
         print(f'[模型] {tag} <- {path} | manhattan={cfg.OBS_MANHATTAN} | '
               f'训练时 food={meta.get("food")}')

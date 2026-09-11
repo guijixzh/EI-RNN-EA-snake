@@ -128,8 +128,8 @@ def benchmark(model_path, num_games=1000, device=None, weak_mask_frac=0.0):
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description='test7b 模型基准测试 (1000 局并发)')
-    ap.add_argument('model', nargs='?', default='test7b_latest_gen_best.pth',
-                    help='模型 .pth 文件路径 (默认 test7b_latest_gen_best.pth)')
+    ap.add_argument('model', nargs='?', default='artifacts/test7b/test7b_latest_gen_best.pth',
+                    help='模型 .pth 文件路径 (默认 artifacts/test7b/test7b_latest_gen_best.pth)')
     ap.add_argument('-n', '--num-games', type=int, default=1000, help='总局数 (默认 1000)')
     ap.add_argument('-d', '--device', type=str, default=None, help='设备 (默认 auto)')
     ap.add_argument('-w', '--weak-mask-frac', type=float, nargs='+', default=[0.0],

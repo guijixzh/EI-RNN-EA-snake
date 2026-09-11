@@ -185,7 +185,7 @@ class Config:
     AUTO_RESUME = True
     CHECKPOINT_INTERVAL = 10
     SEED_FROM_BEST = True
-    SEED_MODEL_PATH = 'test7b_latest_gen_best.pth'   # 7b 最强（saved 67.0 / 千局 61.35）
+    SEED_MODEL_PATH = 'artifacts/test7b/test7b_latest_gen_best.pth'   # 7b 最强（saved 67.0 / 千局 61.35）
     SEED_POP = True            # 全种群克隆注入（cheat 精修模式）
     SEED = 20260908            # 全局随机种子（固定）
 
@@ -2441,7 +2441,7 @@ def main():
     ap.add_argument('--no-fast-eval', dest='fast_eval', action='store_false',
                     help='关闭 fast-eval（标量观测慢路径）')
     ap.add_argument('--seed-model', type=str, default=None,
-                    help='7b 稠密基因组模型路径（默认 test7b_latest_gen_best.pth）')
+                    help='7b 稠密基因组模型路径（默认 artifacts/test7b/test7b_latest_gen_best.pth）')
     ap.add_argument('--no-seed-pop', dest='seed_pop', action='store_false',
                     help='关闭全种群克隆（改单种子注入随机种群）')
     ap.add_argument('--map-seed', type=int, default=None,

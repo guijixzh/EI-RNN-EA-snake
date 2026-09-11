@@ -24,7 +24,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import test16c_cheat7b as sim
 
-MODEL = 'test7b_best_model.pth'      # 7b 实验基模（稠密基因组 → 7b_sparse 转换器）
+MODEL = 'artifacts/test7b/test7b_best_model.pth'      # 7b 实验基模（稠密基因组 → 7b_sparse 转换器）
 N_STATE = 15
 N_PERM = 64
 S_IDX = 0                      # 首尾固定状态（取第 0 个输入）
