@@ -6,8 +6,16 @@
 ## 1. 定位
 
 把 16 系列全部已验证机制收敛为**单一可配置入口** `snake_std.py`：观测环境、适应度
-公式、筛选方案、系统开关四个能力面全部由 CLI 选择。默认配置 = test16b 行为
-（基因组/CRN/适应度逐字同源，`BRAIN_VERSION='sparse1'`），16 系列断点可直接续训。
+公式、筛选方案、系统开关四个能力面全部由 CLI 选择。基因组/CRN 与 16 系列逐字
+同源（`BRAIN_VERSION='sparse1'`），16 系列断点可直接续训。
+
+> **2026-09-12 实证回调**：推荐默认已从 16b 原口径改为
+> **simple 适应度 × 32ego 观测 × N=256 / K=96**——全部最优模型（7b 61.4 /
+> 16b_simp 62.7 / cheat7b 通关）均出自 simple；观测增维到 40 无明显突破
+> （仅小幅提升跨盘面可迁移性）；N=1024 在固定扇入限制总连接数与 256 相当的
+> 口径下未见优化且未条件完成完整实验；K=96 无损覆盖冠军连接数（≥64 无明显
+> 损失）。复现 16b 原口径请显式传参：
+> `--obs 40 --columns 1024 --fanin 16 --fit-mode econ`。
 
 四个能力面与其来源谱系：
 
@@ -23,11 +31,13 @@
 ```bash
 PY=python
 
-# 默认（= 16b 行为：obs40 + econ v7/v8 LCB + 二阶段 + 对半精评 + fast-eval）
+# 推荐起点（默认：32ego + simple v9 + N256/K96 + 二阶段 + 对半精评 + fast-eval）
 $PY -X utf8 -u snake_std.py --gens 320
 
+# 复现 16b 原口径（obs40 + econ v8 + N1024/K16）
+$PY -X utf8 -u snake_std.py --obs 40 --columns 1024 --fanin 16 --fit-mode econ --gens 320
+
 # 观测环境三选一
-$PY -X utf8 -u snake_std.py --obs 32ego        # test12 ego 编码（32 维）
 $PY -X utf8 -u snake_std.py --obs 32proj       # test7b 8 扇区投影（32 维）
 
 # 适应度方案
@@ -101,8 +111,9 @@ $PY -X utf8 -u snake_std.py --play    # 播放 snake_std_best_model.pth（或改
 默认(=16b)、`--obs 32ego`、`--obs 32proj`、`--train-hormone --cycle-pattern G1,G2,G3`、`--robust-eval 2`、`--pools`、`--fixed-map`、`--no-stage2`、`--fit-mode simple`、`--fit-mode tuple`、`--no-stage2-halving`——全部训练完成、checkpoint/best/history 落盘正确。
 （注：连续冒烟共用 `snake_std_smoke_*` 文件时会触发激素断点守卫拦截——守卫按设计工作，矩阵用 `--name` 隔离后全过。）
 
-### 4.3 等价门（默认配置 = 16b 行为）
-`snake_std.py --smoke --seed 42` vs `test16b.py --smoke --seed 42`：history 的
+### 4.3 等价门（显式 16b 口径 = 16b 行为；2026-09-12 默认回调前为默认配置）
+`snake_std.py --smoke --seed 42 --obs 40 --columns 1024 --fanin 16 --fit-mode econ`
+vs `test16b.py --smoke --seed 42`：history 的
 `best_food / avg_food / best_fit / best_seen / elite_food` 全轨迹逐位一致 → **PASS**。
 
 ### 4.4 向后兼容

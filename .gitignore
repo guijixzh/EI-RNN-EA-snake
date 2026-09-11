@@ -21,5 +21,9 @@ preview/
 results/_tmp_*
 results/tmp/
 
+# 凭据（任何推送 Token 一律不入库）
+notify_token.txt
+deploy_*/
+
 # VS Code
 .vscode/

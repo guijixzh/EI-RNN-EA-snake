@@ -3,7 +3,7 @@
 一个把**兴奋-抑制（E-I）皮质柱脑区**当作决策器官、用 GPU 全并行神经进化在贪吃蛇上
 迭代了 16 代实验的研究项目。最终沉淀为两部分：
 
-- **`snake_std.py`** —— 标准实现程序（单文件训练入口）：以最强世代 test16b 为基座，
+- **`snake_std.py`** —— 标准实现程序（单文件训练入口）：以 test16 系列为基座，
   把三套观测环境、多套适应度公式、多套筛选方案与激素/轮换等系统开关全部 CLI 化；
 - **`einbrain/`** —— 经过考验有效的通用库：统一配置、环境、脑模型、E-I 动力学、
   进化 / PPO / NEAT 三条训练范式、IO 与可视化。
@@ -11,26 +11,26 @@
 > **English abstract.** SiNNtry trains an excitatory–inhibitory (E-I) cortical-column
 > recurrent network to play Snake via fully GPU-parallel neuroevolution. The flagship
 > single-file trainer `snake_std.py` exposes three observation encodings (32-dim ego,
-> 32-dim 8-sector projection, 40-dim enriched), several fitness formulas (multiplicative
-> econ, simple efficiency, tuple, robust-min), selection schemes (single-stage,
-> two-stage, stage-2 halving, adaptive-K2 with LCB key), and system toggles (hormone
-> modulation, group-freeze rotation, sensory/motor pool constraints, fixed-map) behind
-> CLI flags. A verified 1000-game model (`test16b_simp_best_model.pth`, 62.7 mean food,
-> vs 61.4 for the previous champion) ships in the repo. Research logs live in `docs/`
-> (Chinese).
+> 32-dim 8-sector projection, 40-dim enriched), several fitness formulas (simple
+> efficiency — the recommended default, multiplicative econ, tuple, robust-min),
+> selection schemes (single-stage, two-stage, stage-2 halving, adaptive-K2 with LCB
+> key), and system toggles (hormone modulation, group-freeze rotation, sensory/motor
+> pool constraints, fixed-map) behind CLI flags. A verified 1000-game model
+> (`test16b_simp_best_model.pth`, 62.7 mean food, vs 61.4 for the previous champion)
+> ships in the repo. Research logs live in `docs/` (Chinese).
 
 ---
 
 ## 目录
 
 - [设计想法](#设计想法)
+- [重要结论](#重要结论)
 - [安装](#安装)
 - [快速开始](#快速开始)
 - [标准实现全开关矩阵](#标准实现全开关矩阵snake_stdpy)
 - [断点续训与可复现](#断点续训与可复现)
 - [使用 einbrain 库](#使用-einbrain-库)
 - [预训练模型](#预训练模型)
-- [结果速览](#结果速览)
 - [仓库结构](#仓库结构)
 - [研究文档](#研究文档)
 - [环境与已知边界](#环境与已知边界)
@@ -53,10 +53,10 @@
 
 ### 2. 基因组：稀疏固定扇入
 
-16 系列把 N×N 稠密循环权重换成**每柱 K 个槽位**（`rec_idx [N,K]` + `rec_w [N,K]`）：
-N=1024、K=16 时循环突触数 16,384 vs 稠密 1,048,576（**64× 计算量缩减**），结构本身
-参与进化（槽位重连变异）。前向即 gather-乘-归约；自检包含稀疏前向与稠密参考的
-逐位等价验证。
+把 N×N 稠密循环权重换成**每柱 K 个槽位**（`rec_idx [N,K]` + `rec_w [N,K]`）：结构本身
+参与进化（槽位重连变异），前向即 gather-乘-归约；自检包含稀疏前向与稠密参考的逐位
+等价验证。**推荐 N=256 / K=96**（无损覆盖冠军网络逐行非零连接数 max=65；降到 64
+亦无明显损失）。
 
 ### 3. 评估：CRN 公共随机数
 
@@ -77,36 +77,87 @@ N=1024、K=16 时循环突触数 16,384 vs 稠密 1,048,576（**64× 计算量�
 
 ### 5. 适应度：少整形，多杠杆
 
-- `econ`（v7 乘法式）：`food × (1 + W_EFF·eff + W_STRAIGHT·straight + W_EDGE·edge) × conn`
-  ——习惯因子随食物等比放大，高食段 20% 的坏习惯折损即 10+ 分；加法项撬不动后期行为。
-- `simple`：`food + k·food/steps_last`（效率最简回退，7b 冠军所用）。
+- **`simple`（推荐，默认）**：`food + k·food/steps_last`——效率最简口径。
+  **全部最优模型（7b 冠军 61.4、16b_simp 62.7、cheat7b 通关）均出自此口径。**
+- `econ`（v7 乘法式，对照保留）：`food × (1 + W_EFF·eff + W_STRAIGHT·straight +
+  W_EDGE·edge) × conn`——习惯因子随食物等比放大的设计很优雅，但**其相对 simple 的
+  额外增益未获证据支持**，仅保留作对照口径。
 - `tuple`：早期词典序口径，保留作对照。
 - **鲁棒最小值评估**：每个体以原权重 + σ=1e-3 权重噪声共 R 份副本评估，取**最差副本**
-  ——把胜者逼到权重邻域鲁棒。
+  ——过滤"混沌彩票解"（对特定权重实现过拟合的个体）。
 - 12 代实验换来的方法论结论：**行为改造的杠杆优先在观测/环境端，适应度整形是弱杠杆**
   （外围 A/B 实验群全部 NULL，见 docs/test7 系日志）。
 
-### 6. 观测工程：从 32 维到 40 维
+### 6. 观测工程：32 维为主，40 维作迁移性扩展
 
-- `32ego1`：食物以**自我中心系**给方位+距离（绝对系被实测证明选择无梯度）；
+- `32ego1`（推荐，默认）：食物以**自我中心系**给方位+距离（绝对系被实测证明选择
+  无梯度），加自身/障碍 8 扇区；
 - `32proj7b`：8 扇区欧氏投影（食物永远可见，经典口径）；
-- `40tailflood1`：追加**饥饿钟压力、尾四方位、前/左/右 7 步有限洪水稀缺度**——后期
-  自困的主因是空间挤压，稀缺度通道让网络"看见"死区。冷启动消融：关掉新 8 通道
-  23.08 食 → 开着 0.42 食，通道真实承重。
+- `40tailflood1`：在 32ego 之上追加**饥饿钟压力、尾四方位、前/左/右 7 步有限洪水
+  稀缺度**。实测结论：**增维到 40 没有明显突破与优化，只是一定程度增加了跨盘面
+  可迁移性**——新增通道真实承重（冷启动消融：关掉 23.08 食 → 开着 0.42 食），
+  但不足以改变格局。
 
-### 7. 系统开关：轮换与激素
+### 7. 系统开关：默认全部关闭（未证明有益，保留接口）
 
-- **训练轮换**：参数分 G1（结构）/G2（动力学）/G3（激素）组，`CYCLE_PATTERN` 逐代
-  指定激活组，冻结组单亲遗传不变异——控制自由度爆炸。
-- **激素系统**（批量版）：前馈网读 `[E;I;total]` → 每类激素**同帧单柱门控释放**
-  （严格超过阈值才释放，零初始化=无操作）→ 沿循环拓扑扩散衰减 → 调制 τ_e。
-  局内动态调制的教训写在 test14 日志：给方差增大的处理做判定，必须配跨库配对消融。
+- **激素系统**（`--train-hormone`）：前馈网读 `[E;I;total]` → 每类激素**同帧单柱
+  门控释放**（严格超过阈值才释放，零初始化=无操作）→ 沿循环拓扑扩散衰减 → 调制
+  τ_e。**默认关闭**：判定为 G1-NULL（"收益"是精英统计通胀而非能力增益，见 test14 日志）。
+- **训练轮换**（`--cycle-pattern`）：参数分 G1（结构）/G2（动力学）/G3（激素）组，
+  可逐代指定激活组、冻结组单亲遗传不变异。**默认两组全开（无冻结）**——冻结交替
+  未证明有益；test5a 式交替需显式 `"G2;G1"`。
+- 其余开关（感觉-运动池约束、固定地图、疲劳、弱连接屏蔽等）同样默认关闭，作为
+  已验证机制的可选接口。
 
 ### 8. fast-eval：把瓶颈从数学搬到调度
 
 逐环境步 ~1200 次 Python 级 torch 调用是真正的瓶颈。fast-eval 把 16 扇区射线改为
 偏移表一次 gather + cumsum 首命中（~960 → ~40 op/步）、遥测降频不减列、消除每步强制
 同步——**~5× 提速且适应度路径逐位不变**（自检对拍保证"提速不改选择"）。
+
+---
+
+## 重要结论
+
+以下三条是全部实验收敛后最值得带走的实证发现：
+
+### 1. 标杆成绩与外部参考模型对比（千局随机地图口径）
+
+| 玩家 | 观测/网络 | 成绩（千局随机盘） | 备注 |
+|---|---|---|---|
+| **test7b 冠军** | 32proj，稠密 N=256 | mean 61.35 / median 62（训练期 67.0） | 效率适应度首冠军 |
+| **test7b（展示素材评测）** | 同上 | mean 61.1 / median 62 / **单盘最高 80** | B=1000 并发评测，最佳盘渲染成 `7b_best_random.mp4` |
+| **test16b_simp（旗舰）** | 40 维，稀疏 K=16, N=1024 | mean 62.67 / median 64 / max 75 | 现基准 |
+| Ackeraa nn_97（外部参考） | 前馈 [32,12,8,4] | mean 27.3 / median 8 / max 78 | 40 局 CRN 同库、免饿死钟口径；双峰：要么早死要么大赢 |
+| chuyangliu/snake（外部参考） | 图搜索（BFS+哈密顿） | mean 48.9 / max 98（整版通关） | 40 局 CRN、含饿死钟；作"物理可达上限"参考解法器 |
+
+解读：进化得到的 E-I 循环网络显著强于同量级前馈学习网络（Ackeraa），但距离图搜索
+的"理想解法器"仍有本质差距——**瓶颈在观测/表征，不在搜索**：千局死亡以撞墙 36% /
+自撞 62% 为主，且后期（蛇长 40+）的坍缩 91–98% 源于空间挤压自撞（test12 期相归因），
+即网络"看不见"死区，而搜索式解法器看得见。
+
+### 2. 模型近似前向模型：历史记忆的影响极小
+
+`experiments/test16_series/exp_7b_memory_probe_random.py`（对 cheat7b 通关模型的
+记忆探针，全随机变体）：把 15 个状态输入槽位以**有放回随机重抽**构造 16 步序列，
+测量动作一致率与 logits 的首末步差异、跨序列末步两两距离。
+
+**结论：模型近似一个前向（反应式）模型——输出极大程度上由当前输入决定，极小受
+历史影响。** K=5 帧思考与 E/I 循环状态确实携带时序信息，但对动作决策的贡献与
+"只看当前帧"几乎无法区分。这对"循环网络学到了长时规划"的直觉是一个重要的反例
+（也解释了为什么观测端的信息直供如此有效）。
+
+### 3. 网络稳定性对结构扰动高度不敏感
+
+三类扰动实验一致表明**性能不依赖个别精确权重，容量冗余很大**：
+
+- **稀疏固定扇入**：同突触预算下，稀疏 K=16/N=1024（循环密度 1.6%）与稠密 N=256
+  相当且略优（62.7 vs 61.4）——97.4% 的循环边为强边，结构本身不是瓶颈；
+- **弱权重删除**：删最弱 0–30% 循环连接 ×1000 局基准，均值 61.35 → 61.05/60.67/61.66
+  （差 <0.7，组内 std≈7–8）；10–40% 弱连接屏蔽波动 ±1.8 食——剪枝不改变分数，
+  只重排死因结构；
+- **权重噪声**：σ=1e-3 微扰副本与原副本成绩差异在噪声量级内（鲁棒最小值口径的
+  作用仅是过滤极少数"混沌彩票解"，而非普遍提升稳定性）。
 
 ---
 
@@ -138,7 +189,7 @@ Windows 可直接双击 `run_snake_std_smoke.bat`（自动定位 conda 环境并
 
 ## 快速开始
 
-### 训练（默认 = 16b 冠军配置）
+### 训练（默认 = 推荐配置）
 
 ```bash
 python snake_std.py --gens 320
@@ -146,15 +197,19 @@ python snake_std.py --gens 320
 #       snake_std_latest_gen_best.pth、snake_std_history.json/png
 ```
 
-默认配置：obs40 观测、pop 4096 / 精英 1024、K1=12 → 保 2048 → 对半精评（A=6/B=18）、
-econ 适应度 + LCB 选择键、CRN 开、fast-eval 开。
+默认配置：**32ego 观测、simple 适应度、N=256 / K=96**、pop 4096 / 精英 1024、
+K1=12 → 保 2048 → 对半精评（A=6/B=18）、LCB 选择键、CRN 开、fast-eval 开。
+激素/轮换/池约束等全部关闭（未证明有益，见[重要结论](#重要结论)与开关矩阵）。
 
 ### 播放与可视化
 
 ```bash
-python snake_std.py --play                          # ASCII 棋盘回放最优模型
+# 回放本仓库自带的旗舰模型（obs40/N1024 口径，需显式对齐参数）
 python -m einbrain.vis test16b_simp_best_model.pth --play --bank-seed 7
-python -m einbrain.vis <model.pth> --topology --matrices --save-prefix results/brain
+python -m einbrain.vis test16b_simp_best_model.pth --topology --matrices --save-prefix results/brain
+
+# 回放自己训练出的最优模型（默认口径）
+python snake_std.py --play
 ```
 
 Web 实时脑活动可视化（拓扑/柱状/热图/3D + 单步调试）：
@@ -169,7 +224,7 @@ python tools/brain_visualizer.py          # 启动后浏览器打开本机服务
 ### 千局基准
 
 ```bash
-python experiments/test16_series/test16b_benchmark.py        # 默认基准模型 vs 7b 参照
+python experiments/test16_series/test16b_benchmark.py        # 16b 基准模型 vs 7b 参照
 python experiments/test7_series/test7b_benchmark.py          # 经典 7b 冠军
 ```
 
@@ -181,17 +236,17 @@ python experiments/test7_series/test7b_benchmark.py          # 经典 7b 冠军
 
 | 取值 | 编码版本 | 说明 |
 |---|---|---|
-| `40`（默认） | 40tailflood1 | 32ego1 前 32 通道 + 饥饿钟/尾方位/洪水稀缺 8 通道（`--no-new-obs` 置零作 A0 对照） |
-| `32ego` | 32ego1 | test12 ego 编码（食物方位+距离倒数，自我中心系） |
+| `32ego`（**默认**） | 32ego1 | test12 ego 编码（食物方位+距离倒数，自我中心系） |
 | `32proj` | 32proj7b | test7b 8 扇区欧氏投影（食物永远可见） |
+| `40` | 40tailflood1 | 32ego1 + 饥饿钟/尾方位/洪水稀缺 8 通道——无明显突破，仅小幅提升可迁移性（`--no-new-obs` 置零作 A0 对照） |
 | `24` | 24ray1 | 早期射线观测（休眠，兼容历史模型） |
 
 ### 适应度 `--fit-mode` 及修饰
 
 | 取值 | 公式 |
 |---|---|
-| `econ`（默认） | v7 乘法式：`food×(1+W_EFF·eff+W_STRAIGHT·straight+W_EDGE·edge)×conn`，因子权重 `--eff-weight/--w-straight/--w-edge` |
-| `simple` | v9：`food + k·food/steps_last`（`--simple-eff-w`） |
+| **`simple`（默认，推荐）** | v9：`food + k·food/steps_last`（`--simple-eff-w`）——**全部最优模型出自此口径** |
+| `econ` | v7 乘法式：`food×(1+W_EFF·eff+W_STRAIGHT·straight+W_EDGE·edge)×conn`——乘法设计的额外增益未获证据支持，对照保留 |
 | `tuple` | test7 词典序 `(food, unseen, −seen)` |
 | `--robust-eval R` | v20 鲁棒最小值：R 份副本（权重噪声 σ=`--robust-sigma`）取最差 |
 | `--te-elite N` | te=步数/转弯数 配额外精英配额 |
@@ -206,12 +261,12 @@ python experiments/test7_series/test7b_benchmark.py          # 经典 7b 冠军
 | 二阶段+对半精评 | 默认开；`--no-stage2-halving` 关闭，`--stage2a-eps/--stage2b-eps` 可调 |
 | 自适应 K2 | 默认开；`--no-k2-adapt/--res-target/--k2-max/--k2-floor-dynamic` |
 
-### 系统开关
+### 系统开关（默认全部关闭）
 
 | 开关 | 说明 |
 |---|---|
-| `--train-hormone` | 激素系统：单柱门控释放 + 沿稀疏拓扑扩散调制 τ_e；G3 参数组进轮换 |
-| `--cycle-pattern "G1,G2,G3"` | 训练轮换：逐代激活组（默认 `"G2,G1"`；G3 须配合激素） |
+| `--train-hormone` | 激素系统：单柱门控释放 + 沿稀疏拓扑扩散调制 τ_e。默认关：判定 G1-NULL（精英通胀非能力增益） |
+| `--cycle-pattern` | 训练轮换：`"G2,G1"`=两组每代全开（同默认）；`"G2;G1"`=真交替冻结（未证明有益） |
 | `--pools` | 感觉-运动池约束：输入/输出列限制在池内（`--sensory-frac/--motor-frac`），强制隐藏层结构 |
 | `--fixed-map` | 固定单张地图训练（`--map-seed`），通关特训口径 |
 | `--turn-gain / --turn-decay` | 转向疲劳（默认关） |
@@ -219,7 +274,8 @@ python experiments/test7_series/test7b_benchmark.py          # 经典 7b 冠军
 | `--weak-mask-frac` | 评估期弱连接屏蔽 |
 | `--no-fast-eval` | 关闭 fast-eval（回退逐字对拍路径） |
 | `--no-one-sided-death` | 关闭单侧转弯判死 |
-| `--fanin / --columns / --pop / --elite` | 扇入 K / 柱数 N / 种群 / 精英（亲本）数 |
+| `--columns / --fanin` | 柱数 N（默认 256）/ 扇入 K（默认 96，≥64 无明显损失） |
+| `--pop / --elite / --gens` | 种群 / 精英（亲本）数 / 代数 |
 | `--seed-model [--seed-pop]` | 种子模型注入（单行/全种群克隆） |
 | `--name` | 输出文件前缀（多臂实验隔离） |
 
@@ -231,9 +287,8 @@ python experiments/test7_series/test7b_benchmark.py          # 经典 7b 冠军
   Ctrl+C 安全；`--gens` 提高后重跑即续训。
 - **跨断点导入**：`--resume-pop <16系列checkpoint.pth>` 可导入任意 16 系列全种群断点
   （版本守卫：N/OBS 编码/BRAIN_VERSION/扇入 K/激素开关逐项校验，拒绝静默错配）。
-- **同种子对照**：`--seed 42` 固定 CPU+CUDA RNG；默认配置与 test16b 逐位等价
-  （等价门见 `docs/standard_implementation_log.md` §4.3）。
-- **FITNESS_VERSION 口径**：econ=8 / simple=9（与 16b 断点互认，best 追踪保留）；
+- **同种子对照**：`--seed 42` 固定 CPU+CUDA RNG。
+- **FITNESS_VERSION 口径**：simple=9（默认）/ econ=8（`--fit-mode econ`）；
   开启鲁棒评估=21、激素=22（口径变化，导入旧断点时 best 追踪按规则重置）。
 
 ---
@@ -268,23 +323,10 @@ brain, cfg, meta = einbrain.io.load_model_any('test16b_simp_best_model.pth')
 |---|---|---|
 | **test16b_simp**（旗舰） | `test16b_simp_best_model.pth`（根目录） | 千局均值 **62.7**；N=1024 稀疏 K=16，obs40 |
 | test7b 冠军 | `artifacts/test7b/test7b_best_model.pth` | 训练期 67.0 / 千局 61.4；N=256 稠密，obs32 投影 |
+| cheat7b 通关模型 | `artifacts/test16c_cheat7b/` | 7b 迁移稀疏 K=96 + 固定地图整版通关 |
 | 16b 变体（mB0/mB1/e32 扇入扩容） | `artifacts/test16b/` | 见 docs/test16b 日志 |
 | test12/14/15 各世代 best | `artifacts/test12…15/` | 32ego → 40tailflood 演化链 |
 | 早期（test4b–test8） | `models/` | LSTM 预训练柱 / 24 维时代 |
-
----
-
-## 结果速览
-
-| 世代 | 观测 | 基因组 | 千局均值（随机盘） | 备注 |
-|---|---|---|---|---|
-| test7b | 32proj | 稠密 N=256 | 61.4 | 首个效率适应度冠军（训练期 67.0） |
-| **test16b_simp** | 40tailflood1 | **稀疏 K=16, N=1024** | **62.7** | 现基准；同连接预算下"多柱×低扇入"反超稠密 |
-| 参照 | — | — | — | 全部为 1000 局随机地图口径；`results/test16b_bench1k.json` 可复现 |
-
-研究脉络（为什么走到这里）：适应度整形不能改造后期行为 → 观测增维（32→40）信息
-直供有效但温启动不可塑 → 稀疏固定扇入把"多柱×低扇入×随机拓扑"做成主战场 →
-fast-eval + 对半精评把单代评估提速 ~5×。完整推导见 `docs/`。
 
 ---
 
@@ -307,7 +349,6 @@ SiNNtry/
 ├── bench/                        性能基准脚本
 ├── models/                       早期模型权重
 ├── results/                      基准 json / 曲线 / 诊断图
-├── deploy_test12/ deploy_test15/ 云端部署包
 └── docs/                         实验日志与研究文档（中文）
 ```
 
@@ -331,7 +372,7 @@ python experiments/test16_series/test16c_cheat7b.py --smoke
 | `docs/test7_series_experiment_log.md` | GPU 主线 test7→7h；CRN/两阶段/类正态变异的来源 |
 | `docs/test11_experiment_log.md` | 锦标赛 vs 两阶段筛选（两阶段胜出） |
 | `docs/test12_experiment_log.md` | ego 观测重写 + 适应度 v3→v7；后期瓶颈归因 |
-| `docs/test13_ppo_experiment_log.md` | 冠军剪枝 + PPO 微调为何不可行 |
+| `docs/test13_ppo_experiment_log.md` | 冠军剪枝 + PPO 微调为何不可行；弱剪枝不敏感实验 |
 | `docs/test14_experiment_log.md` | 激素 v1 与"精英通胀"判定方法学 |
 | `docs/test15_experiment_log.md` | 观测 32→40 增维：标定、A/B、冷启动消融 |
 | `docs/test16b_experiment_log.md` | 稀疏基因组、fast-eval、对半精评、结构对比、扇入扩容 |
@@ -341,25 +382,30 @@ python experiments/test16_series/test16c_cheat7b.py --smoke
 
 ## 环境与已知边界
 
-- **开发环境**：Python 3.13 / torch 2.9（CUDA 13）/ numpy 2.2；Windows 与 Linux 均可
-  （云端部署包为 Linux）。更低 Python 版本未测。
-- **显存**：默认 pop4096/N1024/fast-eval 在 8GB 卡上实测可用（评估分块自动按显存
-  折算，OOM 自动减半重试）；激素开启约 +1.1GB。
+- **开发环境**：Python 3.13 / torch 2.9（CUDA 13）/ numpy 2.2；Windows 与 Linux 均可。
+  更低 Python 版本未测。
+- **显存**：默认 pop4096/N256 在 8GB 卡上余量充足（评估分块自动按显存折算，OOM 自动
+  减半重试）；obs40/N1024 口径（旗舰模型血统）同样 8GB 可用；激素开启约 +1.1GB。
 - **可复现性**：训练受 GPU 非确定性影响，`--seed` 保证同机同库确定；跨机型逐位一致
   不做承诺，千局统计口径可复现（`results/*.json`）。
 - **32ego 历史模型**：test12/14/15 的 32ego 权重是稠密基因组，不能注入 16 系列稀疏
   种群（按设计拒绝）；32ego 观测用于训练新的稀疏世代。
 - `test16c_cheat7b` 的 7b 稠密→稀疏迁移器未并入标准实现，复现请用原脚本。
+- N=1024 柱数方向：同连接预算下未见优化，且因算力条件未完成完整实验——结论以
+  N=256 为准。
 
 ---
 
 ## 第三方与致谢
 
-- `third_party/ackeraa/`、`third_party/chynl/`：外部贪吃蛇 AI 参考实现，仅用于行为
-  对拍与求解器基准，版权归原作者所有。
+- [Ackeraa/snake](https://github.com/Ackeraa/snake)：外部贪吃蛇 AI（`third_party/ackeraa/`，
+  前馈网络 nn_97），用作同环境对拍的参考模型，版权归原作者所有；
+- [chuyangliu/snake](https://github.com/chuyangliu/snake)：GitHub 上的贪吃蛇通关脚本
+  （图搜索），移植为参考解法器（`experiments/test7_series/ref_solver.py` 的
+  GraphAgent/CycleSolver），用于适应度权重标定与"物理可达上限"参照；
 - 项目全部研究日志、判定方法（预注册 A/B 门、跨库配对消融、等价门）与 NULL 结果
   一并开源——负结果也是结果。
 
 ## License
 
-发布前补充（计划采用宽松许可，见仓库 Release 说明）。
+[MIT](LICENSE)

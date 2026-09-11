@@ -2,24 +2,33 @@
 # snake_std.py —— 贪吃蛇进化标准实现程序（以 test16b 为基座）
 #
 # 定位：把 16 系列全部已验证机制收敛为单一可配置入口，四种能力面全部
-# 由 CLI 开关选择，默认配置 = test16b 行为（基因组/CRN/适应度逐字同源，
-# BRAIN_VERSION='sparse1'，--resume-pop 兼容 16 系列断点）。
+# 由 CLI 开关选择。
+#
+# 【推荐起点（默认配置，实证回调）】32ego 观测 × simple 适应度 × N=256/K=96
+#   × 二阶段+对半精评。依据：全部最优模型（7b 61.4 / 16b_simp 62.7 / cheat7b
+#   通关）出自 simple 口径；观测增维到 40 无明显突破（仅小幅提升跨盘面可
+#   迁移性）；N=1024 在同连接预算下未见优化；K=96 无损覆盖冠军连接数。
+#
+# 【复现 16b 原口径】--obs 40 --columns 1024 --fanin 16 --fit-mode econ
+#   （基因组/CRN 逐字同源，BRAIN_VERSION='sparse1'，--resume-pop 兼容 16 系列断点）
 #
 # 【观测环境 --obs】（OBS_ENC_VERSION 随模式切换，checkpoint 守卫按版本串）
-#   40（默认）  '40tailflood1'：32ego1 前 32 通道 + test15 新 8 通道
-#               （钟压/尾四方位/三向7步洪水稀缺）；--no-new-obs 置零新通道（A0 对照）
-#   32ego       '32ego1'：test12 ego 编码（食物方位+距离倒数/自身8扇区/障碍8扇区）
-#   32proj      '32proj7b'：test7b 8 扇区欧氏投影观测（食物永远可见，无遮蔽）
-#   24          旧射线观测（休眠，test7 血统）
+#   32ego（默认）'32ego1'：test12 ego 编码（食物方位+距离倒数/自身8扇区/障碍8扇区）
+#   40           '40tailflood1'：32ego1 前 32 通道 + test15 新 8 通道
+#                （钟压/尾四方位/三向7步洪水稀缺）；--no-new-obs 置零新通道
+#   32proj       '32proj7b'：test7b 8 扇区欧氏投影观测（食物永远可见，无遮蔽）
+#   24           旧射线观测（休眠，test7 血统）
 #
 # 【适应度公式 --fit-mode】
-#   econ（默认）v7 乘法式 food×(1+W_EFF·eff+W_STRAIGHT·straight+W_EDGE·edge)×conn
-#               选择键带 LCB 折价（--sel-lcb/--sel-cv，v8）
-#   simple      v9 最简 food + k·eff（test7b 口径，--simple-eff-w）
-#   tuple       test7 词典序 (food, unseen, -seen)
+#   simple（默认）v9 最简 food + k·eff（test7b 口径，--simple-eff-w）——推荐，
+#                 全部最优模型出自此口径
+#   econ          v7 乘法式 food×(1+W_EFF·eff+W_STRAIGHT·straight+W_EDGE·edge)×conn
+#                 选择键带 LCB 折价（--sel-lcb/--sel-cv，v8）；乘法式的额外
+#                 增益未获证据支持，保留作对照
+#   tuple         test7 词典序 (food, unseen, -seen)
 #   --robust-eval R（≥2 开启，v20 口径）：每个体评估 R 个副本（原权重 +
-#               R-1 份 σ=--robust-sigma 权重噪声），取最差副本整行指标——
-#               逼出权重邻域鲁棒性（16c_cheat7b 移植）
+#                 R-1 份 σ=--robust-sigma 权重噪声），取最差副本整行指标——
+#                 过滤混沌彩票解（16c_cheat7b 移植）
 #   --te-elite N：te=SL/TL 配额外精英配额（7h 遗产）
 #
 # 【筛选方案】
@@ -28,20 +37,21 @@
 #   --stage2-halving（默认开）  二阶段+对半精评（幸存者 ×A → 前 ELITE ×B）
 #   --no-k2-adapt 等            自适应 K2（16a 遗产）
 #
-# 【系统开关】
+# 【系统开关（激素/轮换默认关闭——均未证明有益）】
 #   --train-hormone             激素系统（批量版移植自 einbrain brain/dynamics：
 #                               W_hormone1[H,3N] + 兴奋/抑制头，单柱门控释放，
-#                               沿拓扑稀疏扩散调制 tau_e；G3 参数组进轮换）
-#   --cycle-pattern "G2,G1"     训练轮换系统（逐代激活组，G1=结构 G2=动力学
-#                               G3=激素；冻结组单亲遗传不变异）
+#                               沿拓扑稀疏扩散调制 tau_e；G3 参数组进轮换）。
+#                               默认关：test14 判定 G1-NULL（精英通胀非能力增益）
+#   --cycle-pattern "G2,G1"     训练轮换（冻结组交替）。默认两组全开（无冻结）：
+#                               轮换冻结未证明有益，test5a 式交替需显式指定
 #   --pools                     感觉-运动池约束（16c：输入列限传感池/输出列限
 #                               运动池，强制隐藏层结构；--sensory-frac/--motor-frac）
 #   --fixed-map                 固定单张地图训练（16c_cheat7b：--map-seed）
 #   其余：--turn-gain 疲劳 / --no-crn CRN / --weak-mask-frac 弱连接屏蔽 /
 #         --no-one-sided-death / --no-fast-eval / --seed 等（同 test16b）
 #
-# 输出前缀 snake_std_*；FITNESS_VERSION：econ=8 / simple=9 不变（与 16b 断点
-# 互认），开启激素=22 / 鲁棒评估=21（口径变化，best 追踪自动重置）。
+# 输出前缀 snake_std_*；FITNESS_VERSION：simple=9（默认）/ econ=8 / 开启激素=22 /
+#   鲁棒评估=21（口径变化时 best 追踪自动重置）。
 # ==========================================
 
 import argparse
@@ -99,16 +109,19 @@ class Config:
     EVAL_EPISODES = 24          # 阶段2 局数 K2（累计 K1+K2 定精英）
     MAX_STEPS = 100000
 
-    # --- 脑结构参数（test16：稀疏固定扇入）---
-    NUM_COLUMNS = 1024
-    REC_FANIN = 16              # 每突触后神经元输入槽数 K（≤ N-1）
+    # --- 脑结构参数（稀疏固定扇入；推荐 N=256 / K=96，见文件头"推荐起点"）---
+    NUM_COLUMNS = 256           # 柱数 N。1024 在固定扇入限制总连接数与 256 相当的
+                                # 口径下未见明显优化，且未条件完成完整实验——推荐 256
+    REC_FANIN = 96              # 每突触后神经元输入槽数 K（≤ N-1）。推荐 96
+                                # （覆盖 7b 冠军逐行非零 max=65，无损）；降到 64
+                                # 无明显损失
     EXPAND_K_OLD = 16           # 扇入扩容分界（§9）：槽位 ≥ 此值视为扩容新槽，
                                 # rec 遥测 newSlotW/rec_newmass 的统计分界（K>此值才有意义）
-
-    # --- 观测环境选择（--obs；OBS_DIM/OBS_ENC_VERSION 由 apply_obs_mode 统一推导）---
-    OBS_MODE = '40'             # '40'=40tailflood1 | '32ego'=32ego1 | '32proj'=32proj7b | '24'=旧射线
-    OBS_DIM = 40
-    OBS_ENC_VERSION = '40tailflood1'
+    OBS_MODE = '32ego'          # '32ego'=32ego1（推荐）| '40'=40tailflood1 | '32proj'=32proj7b | '24'=旧射线
+                                # 实测 40 维（钟压/尾方位/洪水稀缺）无明显突破，
+                                # 仅一定程度增加跨盘面可迁移性——默认 32 维
+    OBS_DIM = 32
+    OBS_ENC_VERSION = '32ego1'
     ACTION_DIM = 3
     INIT_DENSITY = 0.15         # 仅用于 M_in/M_out（rec 由 REC_FANIN 决定）
 
@@ -128,12 +141,12 @@ class Config:
     MAP_GEN = 0
 
     # --- 适应度模式与版本 ---
-    FIT_MODE = 'econ'           # 'econ'=v7 乘法式 | 'simple'=食物+k·效率最简回退
-                                # | 'tuple'=元组字典序（旧）
+    # 所有最优模型（7b 冠军 61.4、16b_simp 62.7、cheat7b 通关）均出自 simple；
+    # econ 乘法式的额外增益未获证据支持（保留作对照口径）。
+    FIT_MODE = 'simple'         # 'simple'=食物+k·效率（推荐）| 'econ'=v7 乘法式 | 'tuple'=元组字典序（旧）
     SIMPLE_EFF_W = 0.3          # simple 模式的效率系数 k（test7b 口径）
-    FITNESS_VERSION = 8         # v8 = v7 适应度 + LCB 选择惩罚（仅选择口径；
-                                # 报告/history 口径仍是 v7 base）。导入 v7 断点
-                                # 时 best 追踪自动重置（预期行为）。
+    FITNESS_VERSION = 9         # v9 = simple + LCB 选择惩罚。econ 口径为 v8（--fit-mode econ
+                                # 自动切换）；导入异版本断点时 best 追踪自动重置（预期行为）。
 
     # --- test16a：LCB 选择键 + 自适应 K2（抗噪声卡上限）---
     SEL_LCB_LAMBDA = 1.0        # 选择键 = fitness − λ·SEL_CV·max(food,1)/√K；0=关
@@ -216,8 +229,9 @@ class Config:
 
     # --- 进化筛选策略 ---
     LONG_SNAKE_SCORE_THRESHOLD = 3.0
-    # test16 修复：旧 ('G2','G1','G3') 
-    # 单亲遗传（见 evolve_topology_gpu）彻底杜绝。
+    # 轮换默认"两组全开"（单元素模式表，每代 G1+G2 都激活 = 无冻结）。
+    # 冻结交替（test5a 式）未证明有益，需显式指定，如 [('G2',),('G1',)]
+    # （CLI 用 ';' 分隔逐代：--cycle-pattern "G2;G1"）。
     CYCLE_PATTERN = [('G2', 'G1')]
 
     # --- CRN 公共随机数（筛选种子序列固定）---
@@ -3829,6 +3843,8 @@ def selfcheck(cfg):
     sc_h2 = Config()
     sc_h2.DEVICE = sc_h.DEVICE
     sc_h2.NUM_COLUMNS = 32
+    sc_h2.OBS_MODE = sc_h.OBS_MODE
+    apply_obs_mode(sc_h2)
     sc_h2.TRAIN_HORMONE_NET = True
     torch.manual_seed(107)
     p_h = GeneStack(sc_h2, B=3, device=_resolve_device(sc_h2))
@@ -3992,7 +4008,6 @@ def make_smoke_config():
     cfg.POP_SIZE = 16
     cfg.NUM_COLUMNS = 24
     cfg.REC_FANIN = 8
-    cfg.OBS_DIM = 40
     cfg.ACTION_DIM = 3
     cfg.GENERATIONS = 3
     cfg.ELITE_SIZE = 6
@@ -4123,8 +4138,10 @@ def main():
                     help='开启激素系统（批量版：单柱门控释放+拓扑稀疏扩散调制 tau_e；'
                          'G3 参数组进入轮换/交叉/变异）')
     ap.add_argument('--cycle-pattern', dest='cycle_pattern', type=str, default=None,
-                    help='训练轮换：逗号分隔逐代激活组，如 "G2,G1"（默认）或 '
-                         '"G1,G2,G3"；G1=结构 G2=动力学 G3=激素（须配合 --train-hormone）')
+                    help='训练轮换：逗号分隔=单代激活组（"G2,G1"=两组每代全开，同默认）；'
+                         '分号分隔=逐代交替（"G2;G1"=偶代G2奇代G1，test5a 式冻结轮换）。'
+                         'G1=结构 G2=动力学 G3=激素（须配合 --train-hormone）。'
+                         '冻结轮换未证明有益，默认两组全开')
     ap.add_argument('--pools', dest='pools', action='store_true',
                     help='感觉-运动池约束（16c）：输入列限传感池/输出列限运动池')
     ap.add_argument('--sensory-frac', type=float, default=None,
@@ -4182,8 +4199,8 @@ def main():
         cfg.DEVICE = args.device
     if args.fit_mode:
         cfg.FIT_MODE = args.fit_mode
-        if args.fit_mode == 'simple':
-            cfg.FITNESS_VERSION = 9    # 口径不同，best 追踪独立（9 = food+k·eff + LCB）
+        # 口径版本：simple=9（默认/推荐，所有最优模型出自此口径）；econ=8（对照）
+        cfg.FITNESS_VERSION = 9 if args.fit_mode == 'simple' else 8
         if not args.smoke:
             arm = {'econ': 'econ', 'simple': 'simp', 'tuple': 'tup'}[args.fit_mode]
             cfg.CHECKPOINT_PATH = f'snake_std_{arm}_checkpoint.pth'
@@ -4284,14 +4301,16 @@ def main():
         cfg.TRAIN_HORMONE_NET = True
     if args.cycle_pattern:
         try:
-            groups = [g.strip().upper() for g in args.cycle_pattern.split(',')
-                      if g.strip()]
-            for g in groups:
-                if g not in ('G1', 'G2', 'G3'):
-                    raise ValueError(g)
-            cfg.CYCLE_PATTERN = [tuple(groups)]
+            pattern = []
+            for seg in args.cycle_pattern.split(';'):
+                groups = tuple(g.strip().upper() for g in seg.split(',') if g.strip())
+                if not groups or any(g not in ('G1', 'G2', 'G3') for g in groups):
+                    raise ValueError(seg)
+                pattern.append(groups)
+            cfg.CYCLE_PATTERN = pattern
         except ValueError as e:
-            sys.exit(f'[配置错误] --cycle-pattern 组名无效: {e}（只允许 G1/G2/G3，逗号分隔）')
+            sys.exit(f'[配置错误] --cycle-pattern 组名无效: {e}'
+                     f'（只允许 G1/G2/G3；逗号=单代内多组，分号=逐代交替）')
     if args.pools:
         cfg.POOLS = True
     if args.sensory_frac is not None:
