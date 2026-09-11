@@ -53,9 +53,10 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 MODELS_DIR = os.path.join(REPO_ROOT, "models")
 DEFAULT_MODEL = os.path.join(MODELS_DIR, "test5a_best_model.pth")
 MODEL_FAST_PATH = os.path.join(MODELS_DIR, "test5d_best_model_33.pth")
-# 默认加载：优先最新版本的引擎模型（12 > 7g > 7d > 7c > 7b > 7a > 5a）
+# 默认加载：优先最新版本的引擎模型（16b > 12 > 7g > 7d > 7c > 7b > 7a > 5a）
 DEFAULT_MODEL_KEY = next(
-    (key for key, fname in [("12", "test12_econ_best_model.pth"),
+    (key for key, fname in [("16b", "test16b_simp_best_model.pth"),
+                            ("12", "test12_econ_best_model.pth"),
                             ("7g", "test7g_econ_best_model.pth"),
                             ("7d", "test7d_econ_best_model.pth"),
                             ("7c", "test7c_latest_gen_best.pth"),
@@ -96,7 +97,11 @@ class Engine:
 # 顺序即 detect 优先级：专有字段多的（新版本）放前面
 # 注意：test12 的 Config 也含 OBS_MANHATTAN（与 7g 同），必须排在 7g 之前，
 #       用其专有字段（OBS_ENC_VERSION / ISLAND_PENALTY）区分。
+#       test16 系列（sparse1）也含 OBS_ENC_VERSION，必须排在 test12 之前，
+#       用其专有字段 BRAIN_VERSION=='sparse1' 区分。
 ENGINES = [
+    Engine("16b", "test16b.py",
+           lambda c: c.get("BRAIN_VERSION") == "sparse1"),
     Engine("12", "test12.py",
            lambda c: "OBS_ENC_VERSION" in c or "ISLAND_PENALTY" in c),
     Engine("7g", "test7g.py", lambda c: "OBS_MANHATTAN" in c),
@@ -113,6 +118,7 @@ ENGINES = [
 
 # 内置快捷 key -> 默认模型文件名（不存在时回落到扫描到的第一个）
 ENGINE_DEFAULT_FILE = {
+    "16b": "test16b_simp_best_model.pth",
     "12": "test12_econ_best_model.pth",
     "7a": "test7a_v5a_best_model.pth",
     "7b": "test7b_best_model.pth",
@@ -136,7 +142,11 @@ def detect_engine(path):
 
 
 class BrainGeneAdapter:
-    """把 test7 系 GeneStack 单个体包装成 compute_layout 所需的 brain 接口"""
+    """把 test7/16 系 GeneStack 单个体包装成 compute_layout 所需的 brain 接口。
+
+    16 系列（sparse1）无稠密 M_rec/W_rec，只有 rec_idx/rec_w 槽位：
+    scatter 稠密化（重复源权重叠加，与 gather-乘-归约前向数学等价），
+    布局/边提取/弱连接屏蔽与稠密血统同口径。"""
     is_gene_engine = True
 
     def __init__(self, pop, t7cfg, engine):
@@ -146,15 +156,28 @@ class BrainGeneAdapter:
         self.N = int(pop.N)
         self.obs_dim = int(pop.O)
         self.action_dim = int(pop.A)
+        self.sparse_rec = getattr(pop, "rec_idx", None) is not None
+        self.rec_fanin = int(getattr(pop, "K", 0)) if self.sparse_rec else None
         with torch.no_grad():
             self.M_in = pop.M_in[0].float().cpu()
-            self.M_rec = pop.M_rec[0].float().cpu()
             self.M_out = pop.M_out[0].float().cpu()
             self.W_in = pop.W_in[0].float().cpu()
-            self.W_rec = pop.W_rec[0].float().cpu()
             self.W_out = pop.W_out[0].float().cpu()
             self.b_out = pop.b_out[0].float().cpu()
             self.tau_e_init = pop.tau_e[0].float().cpu()
+            if self.sparse_rec:
+                idx = pop.rec_idx[0].long().cpu().unsqueeze(0)   # [1,N,K]
+                w = pop.rec_w[0].float().cpu().unsqueeze(0)
+                N = self.N
+                M_rec = torch.zeros(1, N, N)
+                M_rec.scatter_(2, idx, 1.0)
+                W_rec = torch.zeros(1, N, N)
+                W_rec.scatter_add_(2, idx, w)
+                self.M_rec = M_rec[0]
+                self.W_rec = W_rec[0]
+            else:
+                self.M_rec = pop.M_rec[0].float().cpu()
+                self.W_rec = pop.W_rec[0].float().cpu()
 
 
 def load_gene_model(path, engine):
@@ -213,16 +236,18 @@ def make_cfg_from_dict(cfg_dict):
 
 
 def available_models():
-    """模型下拉框枚举：内置 5a/fast/12 + 自动扫描根目录所有 test7/test12 系最优模型"""
+    """模型下拉框枚举：内置 5a/fast/16b/12 + 自动扫描根目录 test7/12/16 系最优模型"""
     models = [("5a", "5a 最优 (256)"), ("fast", "5d 最优 (256)")]
-    if os.path.exists(os.path.join(REPO_ROOT, ENGINE_DEFAULT_FILE["12"])):
-        models.append(("12", "12 最优 (256)"))
-    scanned = sorted(glob.glob(os.path.join(REPO_ROOT, "test7*_best*.pth"))) + \
+    for key, label in [("16b", "16b 最优 (1024 稀疏)"), ("12", "12 最优 (256)")]:
+        if os.path.exists(os.path.join(REPO_ROOT, ENGINE_DEFAULT_FILE[key])):
+            models.append((key, label))
+    scanned = sorted(glob.glob(os.path.join(REPO_ROOT, "test16*_best*.pth"))) + \
+              sorted(glob.glob(os.path.join(REPO_ROOT, "test7*_best*.pth"))) + \
               sorted(glob.glob(os.path.join(REPO_ROOT, "test12*_best*.pth")))
     for p in scanned:
         name = os.path.basename(p)
-        if name == ENGINE_DEFAULT_FILE.get("12"):
-            continue   # 已用内置友好标签 "12" 列出，避免重复
+        if name in (ENGINE_DEFAULT_FILE.get("16b"), ENGINE_DEFAULT_FILE.get("12")):
+            continue   # 已用内置友好标签列出，避免重复
         models.append((name, name))
     return models
 
@@ -280,14 +305,12 @@ def compute_layout(brain, cfg):
     W_out_np = brain.W_out.detach().numpy()
     M_out_np = brain.M_out.numpy()
 
-    # ---- 社区划分（以递归子图为图结构）----
+    # ---- 社区划分（以递归子图为图结构；nonzero 向量化，N=1024 可用）----
+    rt, ct = np.nonzero(M_rec_np)
     G = nx.DiGraph()
     for i in range(N):
         G.add_node("Col_" + str(i))
-    for i in range(N):
-        for j in range(N):
-            if M_rec_np[i, j] > 0:
-                G.add_edge("Col_" + str(j), "Col_" + str(i))
+    G.add_edges_from(("Col_" + str(j), "Col_" + str(i)) for i, j in zip(rt.tolist(), ct.tolist()))
     if community_louvain is not None:
         partition = community_louvain.best_partition(G.to_undirected())
     else:
@@ -332,19 +355,25 @@ def compute_layout(brain, cfg):
     pos_col = {}
     block_radius = 0.34 * anchor_step_x
     MIN_NODE_DIST = 0.12
+    # 块内 spring（同块 rec 边 nonzero 向量化）
     for idx_blk, cid in enumerate(comms):
         start, end = boundaries[idx_blk], boundaries[idx_blk + 1]
         block = [int(col) for col in order[start:end]]
         if len(block) == 1:
             sub_pos = {block[0]: (0.0, 0.0)}
         else:
+            bset = np.zeros(N, dtype=bool)
+            bset[block] = True
+            mask_blk = M_rec_np[np.ix_(bset, bset)]
+            sub_rt, sub_ct = np.nonzero(mask_blk)
             sub = nx.DiGraph()
             for col in block:
                 sub.add_node(col)
-            for i in block:
-                for j in block:
-                    if M_rec_np[i, j] > 0:
-                        sub.add_edge(j, i, weight=abs(float(W_rec_np[i, j])))
+            cols_arr = np.array(block)
+            sub.add_weighted_edges_from(
+                ((int(cols_arr[j]), int(cols_arr[i]),
+                  abs(float(W_rec_np[cols_arr[i], cols_arr[j]])))
+                 for i, j in zip(sub_rt.tolist(), sub_ct.tolist())))
             try:
                 sub_pos = nx.spring_layout(sub, k=0.6, iterations=150, seed=42 + int(cid))
             except Exception:
@@ -410,28 +439,33 @@ def compute_layout(brain, cfg):
             if M_out_np[i, j] > 0:
                 out_edges.append([i, j, float(W_out_abs[i, j])])
 
-    rec_edges_all = [(j, i, float(W_rec_np[i, j]))
-                     for i in range(N) for j in range(N) if M_rec_np[i, j] > 0]
-    rec_edges_all.sort(key=lambda e: -abs(e[2]))
-    rec_edges_all = rec_edges_all[:TOP_REC_EDGES]
+    # rec 边提取向量化（N=1024 时 N² Python 循环不可用）：取 |W| top-K
+    rec_w_all = W_rec_np[rt, ct]
+    order_by_w = np.argsort(-np.abs(rec_w_all))[:TOP_REC_EDGES]
     rec_edges = []
-    if rec_edges_all:
-        abs_ws = [abs(e[2]) for e in rec_edges_all]
-        w_min, w_max = min(abs_ws), max(abs_ws)
-        for src, tgt, w in rec_edges_all:
+    if len(order_by_w):
+        abs_ws = np.abs(rec_w_all[order_by_w])
+        w_min, w_max = float(abs_ws.min()), float(abs_ws.max())
+        for kk in order_by_w.tolist():
+            src, tgt, w = int(ct[kk]), int(rt[kk]), float(rec_w_all[kk])
             alpha = (abs(w) - w_min) / (w_max - w_min + 1e-8)
             rec_edges.append([src, tgt, w, float(alpha)])
 
     # 3D 弹簧图边表：每个神经元只保留自己权重最大的前 10 条输入边
     # （W_rec[i, j] = j→i 的权重，按行取 top-10 → 每柱恰好 10 条、无孤立柱）。
     # alpha 用秩（CDF）：权重→弹性换算的归一档位，重尾分布下不受幅值压挤。
+    # torch.topk 逐行向量化；行内实边不足 K 时补位值=0（跳过）。
+    wabs_rows = torch.from_numpy(np.abs(W_rec_np) * M_rec_np)
+    k3 = min(REC3D_TOP_PER_NEURON, N)
+    _vals, _cols = torch.topk(wabs_rows, k=k3, dim=1)
     edges_3d = []
+    vals_np = _vals.numpy()
+    cols_np = _cols.numpy()
     for i in range(N):
-        row = [(abs(float(W_rec_np[i, j])), j) for j in range(N) if M_rec_np[i, j] > 0]
-        if not row:
-            continue
-        row.sort(reverse=True)
-        for w_abs, j in row[:REC3D_TOP_PER_NEURON]:
+        for k in range(k3):
+            if vals_np[i, k] <= 0:
+                break
+            j = int(cols_np[i, k])
             edges_3d.append((j, i, float(W_rec_np[i, j])))
     edges_3d.sort(key=lambda e: -abs(e[2]))
     rec_edges_3d = []
@@ -487,6 +521,9 @@ class GlobalState:
         self.paused = False
         self.request_new = False
         self.speed = 1.0
+        self.auto_next = True       # 局终自动开下一局（False=等手动 🔄）
+        self.stepping = None        # None=连续 | 'game'=按游戏步单步 | 'net'=按网络更新单步
+        self.step_pending = 0       # 已授予未消费的单步许可数
         self.episode = 0
         self.load_state()
 
@@ -501,6 +538,8 @@ class GlobalState:
                 "model_key": self.model_key,
                 "engine": getattr(self.brain, "engine", None) and self.brain.engine.name or "einbrain",
                 "is7a": bool(getattr(self.brain, "is_gene_engine", False)),
+                "sparse": bool(getattr(brain, "sparse_rec", False)),
+                "sparse_fanin": getattr(brain, "rec_fanin", None),
                 "N": int(brain.N),
                 "OBS": int(cfg.OBS_DIM),
                 "ACTION": int(cfg.ACTION_DIM),
@@ -539,7 +578,41 @@ def _round_list(values, nd=4):
     return [round(float(v), nd) for v in values]
 
 
-def build_frame(state, brain, cfg, obs, action, avg_logits, E, I, env, ate, done, steps, score):
+def _grant_step(state, episode, unit):
+    """单步模式闸口：当前模式==unit 时阻塞等待一次步进许可。
+
+    - 返回 False=对局被打断（新局/切模型）；
+    - 模式已切换（如点了另一单位/暂停清除）→ 直接放行，许可留给新模式的闸口，
+      防止旧闸口吞掉新模式的许可或死等。
+    许可来自 /api/control?action=step（每次点击 +1）；暂停不阻塞单步
+    （调试语义：暂停后仍可单步，点步进即解除暂停）。"""
+    while True:
+        with state.cond:
+            if state.version != episode[0] or state.request_new:
+                state.request_new = False
+                return False
+            if state.stepping != unit:
+                return True
+            if state.step_pending > 0:
+                state.step_pending -= 1
+                return True
+            state.cond.wait_for(
+                lambda: (state.version != episode[0] or state.request_new
+                         or state.step_pending > 0 or state.stepping != unit),
+                timeout=0.5)
+
+
+def _push_frame(state, frame):
+    with state.cond:
+        state.latest_frame = frame
+        state.frame_id += 1
+        state.cond.notify_all()
+
+
+def build_frame(state, brain, cfg, obs, action, avg_logits, E, I, env, ate, done, steps, score,
+                body=None, food=None, dirv=None):
+    """构造 SSE 帧。body/food/dirv 给定时用之——必须是与 obs 同一时刻（env.step 之前）
+    的快照；否则 obs 与盘面错位一步，蛇一转弯输入通道就和画面对不上。"""
     with torch.no_grad():
         E_np = _round_list(E.detach().numpy())
         I_np = _round_list(I.detach().numpy())
@@ -552,6 +625,12 @@ def build_frame(state, brain, cfg, obs, action, avg_logits, E, I, env, ate, done
         tau_eff = _round_list(torch.clamp(eff_tau, cfg.TAU_E_MIN, cfg.TAU_E_MAX).detach().numpy())
         fatigue = _round_list(brain.consecutive_counts.detach().numpy())
         logits = _round_list(avg_logits.detach().numpy())
+    if body is None:
+        body = env.body
+    if food is None:
+        food = env.food
+    if dirv is None:
+        dirv = env.dir
     return {
         "type": "frame",
         "obs": obs.tolist() if isinstance(obs, np.ndarray) else list(obs),
@@ -563,13 +642,15 @@ def build_frame(state, brain, cfg, obs, action, avg_logits, E, I, env, ate, done
         "hormone_ex": exc,
         "hormone_in": inh,
         "tau": tau_eff,
-        "body": [[int(seg[0]), int(seg[1])] for seg in env.body],
-        "food": [int(env.food[0]), int(env.food[1])],
-        "dir": [int(env.dir[0]), int(env.dir[1])],
+        "body": [[int(seg[0]), int(seg[1])] for seg in body],
+        "food": [int(food[0]), int(food[1])],
+        "dir": [int(dirv[0]), int(dirv[1])],
         "score": int(score),
         "steps": int(steps),
         "done": bool(done),
         "episode": int(state.episode),
+        "paused": bool(state.paused),
+        "stepping": state.stepping,
     }
 
 
@@ -601,16 +682,22 @@ def _run_episode(state, brain, cfg, episode):
                     continue
             speed = state.speed
 
+        # 单步模式（einbrain 标量路径只有游戏步粒度；net 点击按游戏步执行）
+        if state.stepping is not None and not _grant_step(state, episode, "game"):
+            return False
         action, avg_logits, E, I = deliberate_action(brain, obs, E, I)
         brain.update_fatigue(action)
 
+        # 与 obs 同时刻的盘面快照（env.step 会原地改 body/food/dir）
+        pre_body, pre_food, pre_dir = list(env.body), env.food, env.dir
         next_obs, ate, done, _truncated = env.step(action)
         if ate:
             score += 1
         steps += 1
 
         frame = build_frame(state, brain, cfg, obs, action, avg_logits,
-                            E, I, env, ate, done, steps, score)
+                            E, I, env, ate, done, steps, score,
+                            body=pre_body, food=pre_food, dirv=pre_dir)
         with state.cond:
             state.latest_frame = frame
             state.frame_id += 1
@@ -653,6 +740,39 @@ def _run_episode_gene(state, brain, cfg, episode):
     score = 0
     zeros_hormone = [0.0] * N
 
+    pre_body = pre_food = pre_dirv = None   # 与 obs 同时刻的盘面快照（step 前取）
+
+    def build_frame(action, avg_logits, E, I, st, ate, done):
+        """当前网络/环境状态 → SSE 帧（游戏步与网络步共用）。
+        盘面用 pre_* 快照（与 obs 同一时刻）：env.step 会原地改 body/food/dir，
+        直接读会让盘面比观测超前一步，蛇一转弯输入通道就与画面对不上。"""
+        with torch.no_grad():
+            tau_eff = (pop.tau_e + t7cfg.SHORT_TERM_GAIN * st).clamp(
+                t7cfg.TAU_E_MIN, t7cfg.TAU_E_MAX)
+            fatigue_view = ([0.0, float(cts[0]), float(cts[0])] if press_mode
+                            else _round_list(cts[0]))
+            return {
+                "type": "frame",
+                "obs": obs[0].tolist(),
+                "action": int(action),
+                "logits": _round_list(avg_logits),
+                "fatigue": fatigue_view,
+                "E": _round_list(E[0]),
+                "I": _round_list(I[0]),
+                "hormone_ex": zeros_hormone,   # test7 系无激素支路，填零保持帧格式兼容
+                "hormone_in": zeros_hormone,
+                "tau": _round_list(tau_eff[0]),
+                "body": [[int(seg[0]), int(seg[1])] for seg in pre_body],
+                "food": [int(pre_food[0]), int(pre_food[1])],
+                "dir": [int(pre_dirv[0]), int(pre_dirv[1])],
+                "score": int(score),
+                "steps": int(steps),
+                "done": bool(done),
+                "episode": int(state.episode),
+                "paused": bool(state.paused),
+                "stepping": state.stepping,
+            }
+
     while not done:
         with state.cond:
             if state.version != episode[0] or state.request_new:
@@ -671,13 +791,26 @@ def _run_episode_gene(state, brain, cfg, episode):
 
         with torch.no_grad():
             obs = env.obs()
-            # K 倍帧率思考（与 deliberate_batch 相同流程，额外保留平均 logits 供展示）
+            # 与 obs 同时刻的盘面快照（env.step 原地修改前取值）
+            pre_body = env.body[0, :env.body_len[0]].tolist()
+            pre_food = env.food[0].tolist()
+            pre_dirv = env.DIRS[env.dir_idx[0]].tolist()
+            # K 倍帧率思考（与 deliberate_batch 相同流程，额外保留平均 logits 供展示）。
+            # 网络步进模式：每次内部更新前等一次步进许可，并把中间态（部分 logits
+            # 的倾向动作、已更新 E/I/τ）即时推帧——棋盘不动，网络状态逐次演化。
             K = t7cfg.FRAME_RATE
             logits_sum = None
             for k in range(K):
+                if state.stepping == "net" and not _grant_step(state, episode, "net"):
+                    return False
                 o = obs * (t7cfg.INPUT_DECAY ** k)
                 logits, E, I, st = mod.forward_batch(pop, o, E, I, st, cts, t7cfg)
                 logits_sum = logits if logits_sum is None else logits_sum + logits
+                if state.stepping == "net":
+                    partial = logits_sum / (k + 1)
+                    _push_frame(state, build_frame(
+                        torch.argmax(logits_sum, dim=1)[0], partial[0],
+                        E, I, st, False, False))
             avg_logits = logits_sum / K
             action_t = torch.argmax(logits_sum, dim=1)
             action = int(action_t[0])
@@ -685,42 +818,19 @@ def _run_episode_gene(state, brain, cfg, episode):
                 cts = mod.update_fatigue(cts, action_t, decay=_fat_decay)
             else:
                 cts = mod.update_fatigue(cts, action_t)
+            # 游戏步进模式：K 次网络更新完成后、环境推进前等一次许可
+            if state.stepping == "game" and not _grant_step(state, episode, "game"):
+                return False
             env.step(action_t)
             ate = bool(env.ate[0])
             done = not bool(env.alive[0])
-            tau_eff = (pop.tau_e + t7cfg.SHORT_TERM_GAIN * st).clamp(
-                t7cfg.TAU_E_MIN, t7cfg.TAU_E_MAX)
-            # press 模式：转向压力只作用于左右转 logits，前端按 [Fwd,Left,Right] 显示
-            fatigue_view = ([0.0, float(cts[0]), float(cts[0])] if press_mode
-                            else _round_list(cts[0]))
-            frame = {
-                "type": "frame",
-                "obs": obs[0].tolist(),
-                "action": action,
-                "logits": _round_list(avg_logits[0]),
-                "fatigue": fatigue_view,
-                "E": _round_list(E[0]),
-                "I": _round_list(I[0]),
-                "hormone_ex": zeros_hormone,   # test7a 无激素支路，填零保持帧格式兼容
-                "hormone_in": zeros_hormone,
-                "tau": _round_list(tau_eff[0]),
-                "body": [[int(seg[0]), int(seg[1])] for seg in env.body[0, :env.body_len[0]]],
-                "food": [int(env.food[0, 0]), int(env.food[0, 1])],
-                "dir": [int(env.DIRS[env.dir_idx[0]][0]), int(env.DIRS[env.dir_idx[0]][1])],
-                "score": int(score),
-                "steps": int(steps),
-                "done": bool(done),
-                "episode": int(state.episode),
-            }
-        if ate:
-            score += 1
-            frame["score"] = int(score)
-        steps += 1
+            # 先更新计数再构帧：单步模式下步数/得分需即时反映本步（否则滞后一步）
+            if ate:
+                score += 1
+            steps += 1
+            frame = build_frame(action, avg_logits[0], E, I, st, ate, done)
 
-        with state.cond:
-            state.latest_frame = frame
-            state.frame_id += 1
-            state.cond.notify_all()
+        _push_frame(state, frame)
 
         time.sleep(0.12 / speed)
 
@@ -759,6 +869,17 @@ def game_loop(state):
         if not ok:
             # 收到新局 / 模型切换请求：外层循环立即重新同步
             time.sleep(0.05)
+            continue
+
+        # 局自然结束：自动下一局关闭时挂起等待（🔄 新局或切换模型唤醒）
+        with state.cond:
+            while (not state.auto_next and my_ver == state.version
+                   and not state.request_new):
+                state.cond.wait_for(
+                    lambda: (state.auto_next or state.request_new
+                             or state.version != my_ver),
+                    timeout=0.5)
+            state.request_new = False
 
 
 # ============================================================
@@ -849,18 +970,44 @@ class Handler(BaseHTTPRequestHandler):
         with state.cond:
             if action == "pause":
                 state.paused = True
+                state.stepping = None      # 暂停即退出单步模式
+                state.step_pending = 0
             elif action == "resume":
                 state.paused = False
+                state.stepping = None      # 继续即回到连续运行
+                state.step_pending = 0
                 state.cond.notify_all()
             elif action == "new":
                 state.request_new = True
+                state.cond.notify_all()
+            elif action == "autonext":
+                # 局终自动开下一局开关（on=1/0；缺省取反）
+                if "on" in qs:
+                    state.auto_next = qs["on"][0] in ("1", "true", "True")
+                else:
+                    state.auto_next = not state.auto_next
+                state.cond.notify_all()
+            elif action == "step":
+                # 单步推进一次：unit=game（一个游戏步=K 次网络更新）| net（一次网络更新）
+                unit = (qs.get("unit", ["game"])[0] or "game").strip()
+                unit = unit if unit in ("game", "net") else "game"
+                if state.stepping != unit:
+                    state.step_pending = 0   # 换单位丢弃旧模式的未消费许可
+                state.stepping = unit
+                state.step_pending += 1
+                state.paused = False       # 单步隐含解除暂停（调试语义）
+                state.cond.notify_all()
+            elif action == "stepoff":
+                state.stepping = None
+                state.step_pending = 0
                 state.cond.notify_all()
             if "speed" in qs:
                 try:
                     state.speed = max(0.2, min(8.0, float(qs["speed"][0])))
                 except ValueError:
                     pass
-        self.send_json({"ok": True, "paused": state.paused, "speed": state.speed})
+        self.send_json({"ok": True, "paused": state.paused, "speed": state.speed,
+                        "auto_next": state.auto_next, "stepping": state.stepping})
 
     def handle_stream(self):
         self.send_response(200)

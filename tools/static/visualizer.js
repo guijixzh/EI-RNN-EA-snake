@@ -32,6 +32,8 @@ const S = {
   heatRowH: 4,           // 热力图每行像素高度（滑块实时调节）
   heatCv: null, heatCtx: null,
   connState: "connecting",
+  autoNext: true,        // 局终自动开下一局（与后端开关同步）
+  srvPaused: false, srvStepping: null,   // 后端暂停/单步状态（随帧同步）
   buffers: [],
 };
 
@@ -117,6 +119,19 @@ const OBS32_EGO_GROUPS = [
   { name: "自体 8 扇区 (×8)", from: 16, to: 24, color: "#d07ff5" },
   { name: "障碍 8 扇区 (×8)", from: 24, to: 32, color: "#4aa8ff" },
 ];
+// test16 系列 40tailflood1 观测通道：[0:32] 与 32ego1 同构；
+// [32] 饥饿钟压力，[33:37] 尾相对方位 前/右/后/左，[37:40] 前/左/右 7 步洪水稀缺度（均 ×8）
+const OBS40_LABELS = [
+  ...OBS32_EGO_LABELS,
+  "钟·饥饿压力", "尾相·前", "尾相·右", "尾相·后", "尾相·左",
+  "洪·前", "洪·左", "洪·右",
+];
+const OBS40_GROUPS = [
+  ...OBS32_EGO_GROUPS,
+  { name: "饥饿钟压力 (×8)", from: 32, to: 33, color: "#e3b341" },
+  { name: "尾相对方位 自我系 (×8)", from: 33, to: 37, color: "#39c5cf" },
+  { name: "洪水稀缺 前/左/右 (×8 · 高=空间少)", from: 37, to: 40, color: "#ff7b72" },
+];
 // 按引擎选择观测通道标签集（handleInit 中随 meta.engine 更新）
 S.obs32 = { labels: OBS32_PROJ_LABELS, groups: OBS32_PROJ_GROUPS };
 const obs32Labels = () => S.obs32.labels;
@@ -142,7 +157,7 @@ function makeBarRow(container, label, idPrefix) {
 
 function buildIOPanels() {
   // 24 维（test5a 射线观测）专用面板：仅在 OBS==24 模式下构建
-  if (S.obsMode !== 32) {
+  if (S.obsMode === 24) {
     const cF = $("bars-fdir"), cR = $("bars-ray"), cS = $("bars-self"),
           cT = $("bars-tail"), cD = $("bars-fdist");
     S.barsF = [];
@@ -278,7 +293,7 @@ function rayDirsFromDir(dir) {
 
 function drawVision(ctx, fr, G, cell) {
   if (!fr || !fr.obs) return;
-  if (S.obsMode === 32) return;   // 5 射线视线仅适用于 24 维射线观测模式
+  if (S.obsMode !== 24) return;   // 5 射线视线仅适用于 24 维射线观测模式
   const [dy, dx] = fr.dir;
   const hx = (fr.body[0][1] + .5) * cell;
   const hy = (fr.body[0][0] + .5) * cell;
@@ -393,10 +408,12 @@ function drawGame() {
 /* ---------------- 输入/输出面板更新 ---------------- */
 function drawIO() {
   const fr = S.cur;
-  // 32proj 模式：通用分组条形（8..32 通道 ×8 幅度，按 /8 归一显示）
-  if (S.obsMode === 32) {
-    const obs = fr ? fr.obs : new Array(32).fill(0);
-    for (let i = 0; i < 32; i++) {
+  // ≥32 维模式（32proj / 32ego / 40tailflood）：通用分组条形
+  //（[8:40) 通道 ×8 幅度，按 /8 归一显示；组数与标签随观测编码而定）
+  if (S.obsMode >= 32) {
+    const NOBS = obs32Labels().length;
+    const obs = fr ? fr.obs : new Array(NOBS).fill(0);
+    for (let i = 0; i < NOBS; i++) {
       styleFill(S.bars32[i].fill, obs32ColorOf(i), obs32Norm(i)(obs[i]));
       S.bars32[i].val.textContent = obs[i].toFixed(2);
     }
@@ -501,11 +518,12 @@ function prepareTopoLayout() {
     sctx.fillStyle = commColors[c.color % commColors.length];
     sctx.fillText("C" + c.id, ax, ay - 14);
   }
-  const obsLabels = S.obsMode === 32 ? obs32Labels() : ["食·前", "食·左前", "食·右前", "食·距离",
+  const obsLabels = S.obsMode >= 32 ? obs32Labels() : ["食·前", "食·左前", "食·右前", "食·距离",
     "射·左·径", "射·左·食", "射·左前·径", "射·左前·食", "射·前·径", "射·前·食",
     "射·右前·径", "射·右前·食", "射·右·径", "射·右·食",
     "身·前", "身·左前", "身·左", "身·左后", "身·后", "身·右后", "身·右", "身·右前",
     "尾·前", "尾·左"];
+  const obsLabelOf = (j) => (obsLabels[j] !== undefined ? obsLabels[j] : "In");
   const inR = Math.max(3, Math.round(S.topoNodeR * 1.15));
   sctx.font = "9px Segoe UI, Microsoft YaHei";
   for (let j = 0; j < L.in_y.length; j++) {
@@ -515,7 +533,7 @@ function prepareTopoLayout() {
     sctx.strokeStyle = "#0a0d13"; sctx.lineWidth = 1;
     sctx.strokeRect(x - inR, y - inR, inR * 2, inR * 2);
     sctx.textAlign = "right"; sctx.fillStyle = "#8b98ab";
-    sctx.fillText(j + "·" + obsLabels[j], x - inR - 3, y + 3);
+    sctx.fillText(j + "·" + obsLabelOf(j), x - inR - 3, y + 3);
   }
   const actNames = ["Fwd", "Left", "Right"];
   for (let i = 0; i < L.out_y.length; i++) {
@@ -685,9 +703,12 @@ function drawHeat() {
     // ---- 输入观测视图 ----
   if (S.heatTab === "obs") {
     const rows = S.meta ? S.meta.OBS : 24;
-    const mode32 = S.obsMode === 32;
+    const mode32 = S.obsMode >= 32;
     const rowH = H / rows;
-    const lines = (mode32 ? [0, 4, 8, 16, 24] : [0, 3, 4, 14, 22]).map(v => (v + 0.5) * rowH);
+    // 分组白线：≥32 维按当前标签集的组起点（32proj/32ego/40tailflood 各自正确）
+    const lines = (mode32
+      ? [0, ...obs32Groups().slice(1).map(g => g.from)]
+      : [0, 3, 4, 14, 22]).map(v => (v + 0.5) * rowH);
     const img = ctx.createImageData(W, H);
     const d = img.data;
     for (let p = 0; p < W * H; p++) { d[p * 4] = 13; d[p * 4 + 1] = 17; d[p * 4 + 2] = 23; d[p * 4 + 3] = 255; }
@@ -920,10 +941,16 @@ function safeDraw(name, fn) {
   }
 }
 function renderLoop() {
-  // 超过 3 秒无新帧 → 提示可能后端断开
+  // 超过 3 秒无新帧：区分「单步等待 / 已暂停 / 后端真的断了」
   if (S.cur && Date.now() - lastFrameAt > 3000 && S.connState === "connected") {
-    setConn("reconnecting", "⚠ 数据流中断（后端可能已退出）");
-    setHint("请重新运行 python brain_visualizer.py");
+    if (S.srvStepping) {
+      setHint("单步等待中：点击 ⏭ 游戏步进 / ⏩ 网络步进 继续（▶ 退出单步）");
+    } else if (S.srvPaused) {
+      setHint("已暂停：点 ▶ 继续，或 ⏭/⏩ 单步推进");
+    } else {
+      setConn("reconnecting", "⚠ 数据流中断（后端可能已退出）");
+      setHint("请重新运行 python brain_visualizer.py");
+    }
   }
   if (S.cur) {
     safeDraw("game", drawGame);
@@ -1132,8 +1159,9 @@ function iconOffsets(m) {
 /* 输入端：各组图标在左端 y-z 平面打包成近方形"分类墙"，返回每个输入的 (y,z) */
 function buildInputWall() {
   const OBS = S.meta.OBS;
-  const groups = OBS === 32
-    ? S.obs32.groups.map(g => [g.from, g.to])
+  // ≥32 维：分组随观测编码（32proj/32ego/40tailflood），24 维走旧分组
+  const groups = OBS >= 32
+    ? obs32Groups().map(g => [g.from, g.to])
     : [[0, 3], [3, 4], [4, 14], [14, 22], [22, 24]];
   const tiles = groups.map(([a, b]) => ({ from: a, offs: iconOffsets(b - a) }));
   const t = tiles.length;
@@ -1633,13 +1661,19 @@ function connectSSE() {
       setConn("connected", "已连接后端");
     } else if (msg.type === "frame") {
       lastFrameAt = Date.now();
+      S.srvPaused = !!msg.paused;
+      S.srvStepping = msg.stepping || null;
       handleFrame(msg);
     }
   };
   es.onerror = () => {
     if (es.readyState === EventSource.CLOSED) {
-      setConn("reconnecting", "✗ 无法连接后端");
-      setHint("请先运行 python brain_visualizer.py，再刷新页面");
+      // 后端重启/网络断：EventSource CLOSED 后不会自愈，定时重连
+      setConn("reconnecting", "✗ 后端未运行，2 秒后自动重连…");
+      setHint("后端连接中断，自动重连中（后端启动后会自动恢复）");
+      if (!S.esRetry) {
+        S.esRetry = setTimeout(() => { S.esRetry = null; connectSSE(); }, 2000);
+      }
     } else {
       setConn("reconnecting", "⚠ 连接中断，正在重连…");
     }
@@ -1662,11 +1696,15 @@ function handleInit(msg) {
   S.meta = msg.meta;
   S.order = msg.layout.col_order;
   S.episode = msg.episode;
-  S.obsMode = msg.meta.OBS === 24 ? 24 : 32;
-  // 32 维观测编码按引擎区分：test12 = 32ego1（前/右/后/左方位+距离），其余 = 32proj
-  S.obs32 = (msg.meta.engine === "12")
-    ? { labels: OBS32_EGO_LABELS, groups: OBS32_EGO_GROUPS }
-    : { labels: OBS32_PROJ_LABELS, groups: OBS32_PROJ_GROUPS };
+  // 观测模式：24（test5a 射线）/ 32（7h proj 或 12 ego）/ 40（16 系列 tailflood）
+  S.obsMode = msg.meta.OBS === 24 ? 24 : (msg.meta.OBS > 32 ? 40 : 32);
+  // 标签集按观测编码区分：40tailflood1 与 test12 32ego1 的 [0:32] 同构（引擎 12/16b 均用 ego 标签），
+  // 其余 32 维 = 32proj
+  S.obs32 = (msg.meta.OBS > 32)
+    ? { labels: OBS40_LABELS, groups: OBS40_GROUPS }
+    : (msg.meta.engine === "12")
+      ? { labels: OBS32_EGO_LABELS, groups: OBS32_EGO_GROUPS }
+      : { labels: OBS32_PROJ_LABELS, groups: OBS32_PROJ_GROUPS };
 
   // 模型下拉框：用后端枚举的模型列表重建，并选中当前模型
   const sel = $("modelSelect");
@@ -1682,8 +1720,27 @@ function handleInit(msg) {
   const wantKey = S.urlModel || msg.meta.model_key;
   if (wantKey && [...sel.options].some(o => o.value === wantKey)) sel.value = wantKey;
 
+  // URL 预选模型与后端当前模型不一致 → 走与 onchange 相同的切换路径
+  // （否则 ?model=16b 只改下拉框显示，后端仍在跑旧模型）
+  if (S.urlModel && S.urlModel !== msg.meta.model_key) {
+    const v = S.urlModel;
+    S.urlModel = null;              // 只消费一次，切换回来的 init 不再触发
+    setHint("正在加载模型 " + v + "，请稍候…");
+    fetch("/api/init?model=" + v)
+      .then(r => r.json())
+      .then(m2 => {
+        handleInit(m2);
+        fetch("/api/control?action=new").catch(() => {});
+      })
+      .catch(() => {});
+  }
+
   // 面板文案随观测维度/引擎自适应（7g 为曼哈顿度量观测）
   $("input-sub").textContent = msg.meta.OBS + " 维" + (msg.meta.engine === "7g" ? " · 曼哈顿" : "");
+  const topoSub = $("topo-sub");
+  if (topoSub) topoSub.textContent =
+    "In·" + msg.meta.OBS + " → 柱(" + msg.meta.N + (msg.meta.sparse ? " 稀疏K=" + msg.meta.sparse_fanin : "") +
+    ", 色=τ_e·亮=活动E) → Out·" + msg.meta.ACTION;
   const hto = $("heatTabObs");
   if (hto) hto.textContent = "输入观测 " + msg.meta.OBS + " 行";
   buildIOPanels();
@@ -1723,6 +1780,9 @@ function handleFrame(fr) {
   S.cur = fr;
   $("st-score").textContent = fr.score;
   $("st-steps").textContent = fr.steps;
+  $("game-status").textContent = fr.done
+    ? (S.autoNext ? "本局结束 · 自动开始新局" : "本局结束 · 手动模式：点 🔄 开始下一局")
+    : "本局结束 · 自动开始新局";
   $("game-status").classList.toggle("show", fr.done);
   pushFrame(fr);
 }
@@ -1745,6 +1805,15 @@ function doControl(qs, btn) {
       setConn("reconnecting", "✗ 控制失败（后端未运行）");
       setHint("请先运行 python brain_visualizer.py");
     });
+}
+
+/* 单步模式按钮态：game/net 互斥高亮；退出（暂停/继续/新局）时清除 */
+function setStepUI(unit) {
+  $("btnStepGame").classList.toggle("pressed", unit === "game");
+  $("btnStepNet").classList.toggle("pressed", unit === "net");
+}
+function clearStepUI() {
+  setStepUI(null);
 }
 
 window.addEventListener("DOMContentLoaded", () => {
@@ -1853,7 +1922,28 @@ window.addEventListener("DOMContentLoaded", () => {
     const btn = $("btnPause");
     btn.textContent = S.paused ? "▶ 继续" : "⏸ 暂停";
     btn.classList.toggle("pressed", S.paused);
+    if (S.paused) clearStepUI();        // 暂停退出单步模式（后端同步清理）
     doControl("action=" + (S.paused ? "pause" : "resume"), null);
+  };
+  // 单步调试：游戏步进=一个游戏步（K 次网络更新）；网络步进=一次网络更新
+  //（棋盘不动，E/I/τ 逐次演化；网络步按钮连点 K 次后环境走一步）
+  $("btnStepGame").onclick = () => {
+    setStepUI("game");
+    doControl("action=step&unit=game", $("btnStepGame"));
+    setHint("游戏步进：每次点击推进一个游戏步（⏸ 或 ▶ 退出单步）");
+  };
+  $("btnStepNet").onclick = () => {
+    setStepUI("net");
+    doControl("action=step&unit=net", $("btnStepNet"));
+    setHint("网络步进：每次点击推进一次网络更新；满 " +
+            (S.meta ? S.meta.FRAME_RATE : 5) + " 次后环境走一步");
+  };
+  // 局终自动开下一局开关
+  $("btnAutoNext").onclick = () => {
+    S.autoNext = !S.autoNext;
+    $("btnAutoNext").classList.toggle("pressed", S.autoNext);
+    fetch("/api/control?action=autonext&on=" + (S.autoNext ? 1 : 0)).catch(() => {});
+    setHint(S.autoNext ? "自动下一局：开" : "自动下一局：关（局终后点 🔄 开始下一局）");
   };
   $("speedSlider").oninput = e => {
     S.speed = parseFloat(e.target.value);

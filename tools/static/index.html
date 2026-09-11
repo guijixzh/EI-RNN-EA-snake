@@ -199,6 +199,9 @@
       </label>
       <button id="btnNew" class="primary">🔄 重新开始</button>
       <button id="btnPause">⏸ 暂停</button>
+      <button id="btnStepGame" title="单步推进一个游戏步（K=5 次网络更新后环境走一步）">⏭ 游戏步进</button>
+      <button id="btnStepNet" title="单步推进一次网络更新（棋盘不动，E/I/τ 逐次演化；满 K 次后环境走一步）">⏩ 网络步进</button>
+      <button id="btnAutoNext" class="pressed" title="局终是否自动开始下一局；关闭后局终挂起，点 🔄 开始下一局">🔁 自动下一局</button>
       <label>速度 <input type="range" id="speedSlider" min="0.5" max="4" step="0.5" value="1"></label>
     </div>
     <div class="stats">
@@ -259,7 +262,7 @@
     </div>
 
     <div class="card" id="topo-card">
-      <div class="card-title">② 拓扑网络实时状态 <span class="sub">In·24 → 柱(色=τ_e·亮=活动E) → Out·3</span></div>
+      <div class="card-title">② 拓扑网络实时状态 <span class="sub" id="topo-sub">In → 柱(色=τ_e·亮=活动E) → Out</span></div>
       <div class="card-body"><canvas id="topoCanvas"></canvas></div>
     </div>
 

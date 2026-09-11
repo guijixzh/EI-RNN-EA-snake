@@ -10,5 +10,16 @@ logs/
 # 断点（训练中间产物）
 *_checkpoint.pth
 
+# 种群备份存档（大文件）
+*_backup.pth
+
+# 成品视频与预览QA图（大文件不入库）
+*.mp4
+preview/
+
+# 临时/草稿
+results/_tmp_*
+results/tmp/
+
 # VS Code
 .vscode/

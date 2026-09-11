@@ -72,10 +72,30 @@ def save_brain_state(brain, use_half=True):
         }
 
 
+def _densify_sparse_rec(state, N):
+    """16 系列（test16/16a/16b，BRAIN_VERSION='sparse1'）稀疏循环基因组 → 稠密。
+
+    rec_idx [N,K] / rec_w [N,K]（槽位制，重复源=权重叠加）scatter 成稠密
+    M_rec/W_rec：数学上与 gather-乘-归约前向逐位等价（重复源叠加）。
+    槽位权重为 0 的连接 M=1 但 W=0，W*M=0 等效断开，语义一致。
+    返回 (M_rec, W_rec, K)。"""
+    rec_idx = state['rec_idx'].long()
+    rec_w = state['rec_w'].float()
+    K = int(state.get('K', rec_idx.shape[-1]))
+    if rec_idx.shape[0] != N:
+        raise ValueError(f"rec_idx 行数 {rec_idx.shape[0]} != N={N}")
+    M_rec = torch.zeros(N, N)
+    W_rec = torch.zeros(N, N)
+    M_rec.scatter_(1, rec_idx, 1.0)
+    W_rec.scatter_add_(1, rec_idx, rec_w)
+    return M_rec, W_rec, K
+
+
 def load_brain_state(state, cfg):
     """从 save_brain_state 的 dict 重建 EIBrainRegion 个体。
 
-    兼容 test5d/6/7 三种格式：缺 V/b_v 时默认零初始化。
+    兼容 test5d/6/7（稠密 W_rec/M_rec）与 test16 系列（稀疏 rec_idx/rec_w，
+    稠密化等价展开，brain.sparse_rec=True 标记来源）：缺 V/b_v 时默认零初始化。
     """
     from .brain import EIBrainRegion
 
@@ -92,11 +112,24 @@ def load_brain_state(state, cfg):
     _dev = state['W_in'].device if torch.is_tensor(state['W_in']) else torch.device('cpu')
 
     new.M_in = state['M_in'].float()
-    new.M_rec = state['M_rec'].float()
     new.M_out = state['M_out'].float()
 
+    if 'rec_idx' in state and 'rec_w' in state and 'W_rec' not in state:
+        # 16 系列稀疏基因组：稠密化展开（前向/可视化等价），保留溯源元数据
+        M_rec, W_rec, K = _densify_sparse_rec(state, new.N)
+        new.sparse_rec = True
+        new.rec_fanin = K
+        new.rec_slots = int(state['rec_idx'].numel())
+        new.rec_unique_edges = int(M_rec.sum().item())
+        new.M_rec = M_rec
+        new.W_rec = nn.Parameter(W_rec)
+    else:
+        new.sparse_rec = False
+        new.rec_fanin = None
+        new.M_rec = state['M_rec'].float()
+        new.W_rec = nn.Parameter(state['W_rec'].float())
+
     new.W_in = nn.Parameter(state['W_in'].float())
-    new.W_rec = nn.Parameter(state['W_rec'].float())
     new.W_out = nn.Parameter(state['W_out'].float())
     new.b_out = nn.Parameter(state['b_out'].float())
     new.tau_e_init = nn.Parameter(state['tau_e_init'].float())
@@ -168,6 +201,44 @@ def load_best_model_brain(path, cfg):
         return None
     brain = load_brain_state(data['brain'], cfg)
     return brain, float(data.get('food', -1.0)), float(data.get('steps', 0.0))
+
+
+def load_model_any(path):
+    """读任意血统的最优模型文件（test5d/6/7 稠密、test16 系列稀疏），
+    用其自带 config（缺省以本包 Config 兜底）构造 brain。
+
+    返回 (brain, cfg, meta)：cfg 为 SimpleNamespace（可喂 einbrain 各组件），
+    meta 含 food/steps/saved_at/saved_config 与 sparse 标记；读取失败返回 None。"""
+    import types
+    from .config import Config
+
+    path = model_path(path)
+    if not os.path.exists(path):
+        print(f"警告: 模型 {path} 不存在")
+        return None
+    try:
+        data = torch.load(path, map_location='cpu', weights_only=False)
+    except Exception as e:
+        print(f"警告: 模型 {path} 读取失败 ({e})")
+        return None
+    saved_cfg = dict(data.get('config') or {})
+    base = {k: v for k, v in vars(Config).items()
+            if not k.startswith('__') and not callable(v)}
+    base.update(saved_cfg)
+    cfg = types.SimpleNamespace(**base)
+    if 'brain' not in data:
+        print(f"警告: 模型 {path} 无 'brain' 字段")
+        return None
+    brain = load_brain_state(data['brain'], cfg)
+    meta = {
+        'food': float(data.get('food', -1.0)),
+        'steps': float(data.get('steps', 0.0)),
+        'saved_at': data.get('saved_at', ''),
+        'saved_config': saved_cfg,
+        'sparse_rec': bool(brain.sparse_rec),
+        'rec_fanin': brain.rec_fanin,
+    }
+    return brain, cfg, meta
 
 
 def save_checkpoint(path, cfg, next_gen, population, history,
