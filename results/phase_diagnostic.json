@@ -1,0 +1,561 @@
+{
+ "generated_at": "2026-09-02 05:13:15",
+ "config": {
+  "tiers": [
+   2,
+   20,
+   30,
+   40,
+   50
+  ],
+  "n_spawn": 128,
+  "n_nat": 320,
+  "step_cap": 6000,
+  "device": "cuda"
+ },
+ "gate": {
+  "verdict": "P0-CONFIRM(STRONG)",
+  "detail": [
+   "test12 coil L=30: ratio=1.00 (spawned 18.0 vs natural 18.0), self-death=73%",
+   "test12 coil L=40: ratio=0.25 (spawned 2.0 vs natural 8.0), self-death=91%",
+   "test12 coil L=50: ratio=0.67 (spawned 2.0 vs natural 3.0), self-death=98%",
+   "test12 teacher L=30: ratio=1.00 (spawned 18.0 vs natural 18.0), self-death=79%",
+   "test12 teacher L=40: ratio=0.50 (spawned 4.0 vs natural 8.0), self-death=84%",
+   "test12 teacher L=50: ratio=0.33 (spawned 1.0 vs natural 3.0), self-death=91%",
+   "test7b: coil L=2 对照失效 (med=0.0 vs natural 63.0) → coil 构型判 OOD 混杂，门仅用 teacher",
+   "test7b teacher L=30: ratio=0.03 (spawned 1.0 vs natural 35.0), self-death=66%",
+   "test7b teacher L=40: ratio=0.00 (spawned 0.0 vs natural 25.0), self-death=64%",
+   "test7b teacher L=50: ratio=0.00 (spawned 0.0 vs natural 15.0), self-death=60%"
+  ]
+ },
+ "results": {
+  "test12": {
+   "checkpoint": "test12_econ_latest_gen_best.pth",
+   "checkpoint_food": 44.71428680419922,
+   "obs_enc": "32ego1",
+   "starve_slope": 10.0,
+   "spawned": {
+    "coil": {
+     "2": {
+      "n": 128,
+      "food_median": 45.0,
+      "food_mean": 40.5,
+      "p25": 38.75,
+      "p75": 48.0,
+      "steps_median": 694.0,
+      "death_causes": {
+       "wall": 0.1953125,
+       "self": 0.6796875,
+       "starve": 0.125,
+       "censored": 0.0
+      },
+      "conn_at_death_median": 0.20000000298023224,
+      "reach_at_death_median": 0.4711431860923767,
+      "trace_failed": 0
+     },
+     "20": {
+      "n": 128,
+      "food_median": 28.0,
+      "food_mean": 23.7578125,
+      "p25": 20.75,
+      "p75": 31.0,
+      "steps_median": 502.5,
+      "death_causes": {
+       "wall": 0.34375,
+       "self": 0.6328125,
+       "starve": 0.0234375,
+       "censored": 0.0
+      },
+      "conn_at_death_median": 0.20000000298023224,
+      "reach_at_death_median": 0.18697033822536469,
+      "trace_failed": 0
+     },
+     "30": {
+      "n": 128,
+      "food_median": 18.0,
+      "food_mean": 15.8203125,
+      "p25": 12.0,
+      "p75": 21.0,
+      "steps_median": 335.5,
+      "death_causes": {
+       "wall": 0.2421875,
+       "self": 0.7265625,
+       "starve": 0.03125,
+       "censored": 0.0
+      },
+      "conn_at_death_median": 0.20000000298023224,
+      "reach_at_death_median": 0.4499799907207489,
+      "trace_failed": 0
+     },
+     "40": {
+      "n": 128,
+      "food_median": 2.0,
+      "food_mean": 2.2265625,
+      "p25": 1.0,
+      "p75": 3.0,
+      "steps_median": 30.5,
+      "death_causes": {
+       "wall": 0.09375,
+       "self": 0.90625,
+       "starve": 0.0,
+       "censored": 0.0
+      },
+      "conn_at_death_median": 0.25,
+      "reach_at_death_median": 0.10169491171836853,
+      "trace_failed": 0
+     },
+     "50": {
+      "n": 128,
+      "food_median": 2.0,
+      "food_mean": 2.1015625,
+      "p25": 1.0,
+      "p75": 3.0,
+      "steps_median": 26.0,
+      "death_causes": {
+       "wall": 0.0234375,
+       "self": 0.9765625,
+       "starve": 0.0,
+       "censored": 0.0
+      },
+      "conn_at_death_median": 0.25,
+      "reach_at_death_median": 0.10204081982374191,
+      "trace_failed": 0
+     }
+    },
+    "teacher": {
+     "2": {
+      "n": 128,
+      "food_median": 44.0,
+      "food_mean": 40.75,
+      "p25": 40.0,
+      "p75": 49.0,
+      "steps_median": 695.0,
+      "death_causes": {
+       "wall": 0.1953125,
+       "self": 0.6796875,
+       "starve": 0.125,
+       "censored": 0.0
+      },
+      "conn_at_death_median": 0.20000000298023224,
+      "reach_at_death_median": 0.5357142686843872,
+      "trace_failed": 0
+     },
+     "20": {
+      "n": 128,
+      "food_median": 27.0,
+      "food_mean": 25.8984375,
+      "p25": 23.0,
+      "p75": 31.0,
+      "steps_median": 495.0,
+      "death_causes": {
+       "wall": 0.3203125,
+       "self": 0.6328125,
+       "starve": 0.046875,
+       "censored": 0.0
+      },
+      "conn_at_death_median": 0.20000000298023224,
+      "reach_at_death_median": 0.429824560880661,
+      "trace_failed": 0
+     },
+     "30": {
+      "n": 128,
+      "food_median": 18.0,
+      "food_mean": 17.0234375,
+      "p25": 14.0,
+      "p75": 21.25,
+      "steps_median": 397.5,
+      "death_causes": {
+       "wall": 0.1796875,
+       "self": 0.7890625,
+       "starve": 0.03125,
+       "censored": 0.0
+      },
+      "conn_at_death_median": 0.20000000298023224,
+      "reach_at_death_median": 0.3176392614841461,
+      "trace_failed": 0
+     },
+     "40": {
+      "n": 128,
+      "food_median": 4.0,
+      "food_mean": 5.2734375,
+      "p25": 1.0,
+      "p75": 9.0,
+      "steps_median": 57.0,
+      "death_causes": {
+       "wall": 0.1640625,
+       "self": 0.8359375,
+       "starve": 0.0,
+       "censored": 0.0
+      },
+      "conn_at_death_median": 0.20000000298023224,
+      "reach_at_death_median": 0.19166666269302368,
+      "trace_failed": 0
+     },
+     "50": {
+      "n": 128,
+      "food_median": 1.0,
+      "food_mean": 1.3828125,
+      "p25": 0.0,
+      "p75": 2.0,
+      "steps_median": 19.5,
+      "death_causes": {
+       "wall": 0.09375,
+       "self": 0.90625,
+       "starve": 0.0,
+       "censored": 0.0
+      },
+      "conn_at_death_median": 0.25,
+      "reach_at_death_median": 0.05882352963089943,
+      "trace_failed": 0
+     }
+    }
+   },
+   "natural": {
+    "n": 320,
+    "food_median": 45.0,
+    "food_mean": 42.35625076293945,
+    "death_causes": {
+     "wall": 0.246875,
+     "self": 0.659375,
+     "starve": 0.09375
+    },
+    "tiers": {
+     "2": {
+      "n_reach": 309,
+      "reach_rate": 0.965624988079071,
+      "postL_food_median": 45.0,
+      "postL_food_mean": 43.864078521728516,
+      "p25": 41.0,
+      "p75": 49.0,
+      "turn_density_postL": 0.7439281940460205,
+      "death_causes_postL": {
+       "wall": 0.255663430420712,
+       "self": 0.6828478964401294,
+       "starve": 0.061488673139158574
+      }
+     },
+     "20": {
+      "n_reach": 302,
+      "reach_rate": 0.9437500238418579,
+      "postL_food_median": 28.0,
+      "postL_food_mean": 26.552980422973633,
+      "p25": 24.0,
+      "p75": 31.0,
+      "turn_density_postL": 0.7389017343521118,
+      "death_causes_postL": {
+       "wall": 0.24834437086092714,
+       "self": 0.695364238410596,
+       "starve": 0.056291390728476824
+      }
+     },
+     "30": {
+      "n_reach": 289,
+      "reach_rate": 0.903124988079071,
+      "postL_food_median": 18.0,
+      "postL_food_mean": 17.59169578552246,
+      "p25": 14.0,
+      "p75": 21.0,
+      "turn_density_postL": 0.7538347840309143,
+      "death_causes_postL": {
+       "wall": 0.2491349480968858,
+       "self": 0.7058823529411765,
+       "starve": 0.04498269896193772
+      }
+     },
+     "40": {
+      "n_reach": 267,
+      "reach_rate": 0.8343750238418579,
+      "postL_food_median": 8.0,
+      "postL_food_mean": 8.61048698425293,
+      "p25": 5.0,
+      "p75": 12.0,
+      "turn_density_postL": 0.7214665412902832,
+      "death_causes_postL": {
+       "wall": 0.24719101123595505,
+       "self": 0.704119850187266,
+       "starve": 0.04868913857677903
+      }
+     },
+     "50": {
+      "n_reach": 103,
+      "reach_rate": 0.3218750059604645,
+      "postL_food_median": 3.0,
+      "postL_food_mean": 3.252427101135254,
+      "p25": 1.0,
+      "p75": 5.0,
+      "turn_density_postL": 0.5320116877555847,
+      "death_causes_postL": {
+       "wall": 0.27184466019417475,
+       "self": 0.7184466019417476,
+       "starve": 0.009708737864077669
+      }
+     }
+    }
+   }
+  },
+  "test7b": {
+   "checkpoint": "test7b_latest_gen_best.pth",
+   "checkpoint_food": 67.0,
+   "obs_enc": "32proj",
+   "starve_slope": 3.0,
+   "spawned": {
+    "coil": {
+     "2": {
+      "n": 128,
+      "food_median": 0.0,
+      "food_mean": 8.2890625,
+      "p25": 0.0,
+      "p75": 0.0,
+      "steps_median": 8.0,
+      "death_causes": {
+       "wall": 0.8984375,
+       "self": 0.1015625,
+       "starve": 0.0,
+       "censored": 0.0
+      },
+      "conn_at_death_median": 1.0,
+      "reach_at_death_median": 1.0,
+      "trace_failed": 0
+     },
+     "20": {
+      "n": 128,
+      "food_median": 44.0,
+      "food_mean": 43.765625,
+      "p25": 39.75,
+      "p75": 47.25,
+      "steps_median": 873.0,
+      "death_causes": {
+       "wall": 0.25,
+       "self": 0.75,
+       "starve": 0.0,
+       "censored": 0.0
+      },
+      "conn_at_death_median": 0.20000000298023224,
+      "reach_at_death_median": 0.0,
+      "trace_failed": 0
+     },
+     "30": {
+      "n": 128,
+      "food_median": 0.0,
+      "food_mean": 1.1640625,
+      "p25": 0.0,
+      "p75": 0.0,
+      "steps_median": 7.0,
+      "death_causes": {
+       "wall": 0.953125,
+       "self": 0.046875,
+       "starve": 0.0,
+       "censored": 0.0
+      },
+      "conn_at_death_median": 0.5,
+      "reach_at_death_median": 0.9014084339141846,
+      "trace_failed": 0
+     },
+     "40": {
+      "n": 128,
+      "food_median": 2.0,
+      "food_mean": 7.5234375,
+      "p25": 1.0,
+      "p75": 11.25,
+      "steps_median": 32.0,
+      "death_causes": {
+       "wall": 0.0625,
+       "self": 0.9375,
+       "starve": 0.0,
+       "censored": 0.0
+      },
+      "conn_at_death_median": 0.25,
+      "reach_at_death_median": 0.0,
+      "trace_failed": 0
+     },
+     "50": {
+      "n": 128,
+      "food_median": 0.0,
+      "food_mean": 0.234375,
+      "p25": 0.0,
+      "p75": 0.0,
+      "steps_median": 5.0,
+      "death_causes": {
+       "wall": 0.9453125,
+       "self": 0.0546875,
+       "starve": 0.0,
+       "censored": 0.0
+      },
+      "conn_at_death_median": 0.5,
+      "reach_at_death_median": 0.9019607901573181,
+      "trace_failed": 0
+     }
+    },
+    "teacher": {
+     "2": {
+      "n": 128,
+      "food_median": 61.0,
+      "food_mean": 61.2890625,
+      "p25": 58.0,
+      "p75": 66.0,
+      "steps_median": 1071.5,
+      "death_causes": {
+       "wall": 0.2265625,
+       "self": 0.7734375,
+       "starve": 0.0,
+       "censored": 0.0
+      },
+      "conn_at_death_median": 0.20000000298023224,
+      "reach_at_death_median": 0.0,
+      "trace_failed": 0
+     },
+     "20": {
+      "n": 128,
+      "food_median": 38.5,
+      "food_mean": 26.2421875,
+      "p25": 0.0,
+      "p75": 46.0,
+      "steps_median": 672.5,
+      "death_causes": {
+       "wall": 0.421875,
+       "self": 0.578125,
+       "starve": 0.0,
+       "censored": 0.0
+      },
+      "conn_at_death_median": 0.25,
+      "reach_at_death_median": 0.0,
+      "trace_failed": 0
+     },
+     "30": {
+      "n": 128,
+      "food_median": 1.0,
+      "food_mean": 10.3515625,
+      "p25": 0.0,
+      "p75": 26.5,
+      "steps_median": 15.0,
+      "death_causes": {
+       "wall": 0.34375,
+       "self": 0.65625,
+       "starve": 0.0,
+       "censored": 0.0
+      },
+      "conn_at_death_median": 0.5,
+      "reach_at_death_median": 0.0,
+      "trace_failed": 0
+     },
+     "40": {
+      "n": 128,
+      "food_median": 0.0,
+      "food_mean": 2.546875,
+      "p25": 0.0,
+      "p75": 1.0,
+      "steps_median": 8.0,
+      "death_causes": {
+       "wall": 0.359375,
+       "self": 0.640625,
+       "starve": 0.0,
+       "censored": 0.0
+      },
+      "conn_at_death_median": 0.5,
+      "reach_at_death_median": 0.008196720853447914,
+      "trace_failed": 0
+     },
+     "50": {
+      "n": 128,
+      "food_median": 0.0,
+      "food_mean": 0.71875,
+      "p25": 0.0,
+      "p75": 1.0,
+      "steps_median": 10.5,
+      "death_causes": {
+       "wall": 0.3984375,
+       "self": 0.6015625,
+       "starve": 0.0,
+       "censored": 0.0
+      },
+      "conn_at_death_median": 0.5,
+      "reach_at_death_median": 0.0,
+      "trace_failed": 0
+     }
+    }
+   },
+   "natural": {
+    "n": 320,
+    "food_median": 63.0,
+    "food_mean": 62.50312423706055,
+    "death_causes": {
+     "wall": 0.196875,
+     "self": 0.803125,
+     "starve": 0.0
+    },
+    "tiers": {
+     "2": {
+      "n_reach": 320,
+      "reach_rate": 1.0,
+      "postL_food_median": 63.0,
+      "postL_food_mean": 62.50312423706055,
+      "p25": 59.0,
+      "p75": 66.0,
+      "turn_density_postL": 0.8224267959594727,
+      "death_causes_postL": {
+       "wall": 0.196875,
+       "self": 0.803125,
+       "starve": 0.0
+      }
+     },
+     "20": {
+      "n_reach": 318,
+      "reach_rate": 0.9937499761581421,
+      "postL_food_median": 45.0,
+      "postL_food_mean": 44.8144645690918,
+      "p25": 42.0,
+      "p75": 48.0,
+      "turn_density_postL": 0.8450875878334045,
+      "death_causes_postL": {
+       "wall": 0.19811320754716982,
+       "self": 0.8018867924528302,
+       "starve": 0.0
+      }
+     },
+     "30": {
+      "n_reach": 318,
+      "reach_rate": 0.9937499761581421,
+      "postL_food_median": 35.0,
+      "postL_food_mean": 34.8144645690918,
+      "p25": 32.0,
+      "p75": 38.0,
+      "turn_density_postL": 0.842197060585022,
+      "death_causes_postL": {
+       "wall": 0.19811320754716982,
+       "self": 0.8018867924528302,
+       "starve": 0.0
+      }
+     },
+     "40": {
+      "n_reach": 318,
+      "reach_rate": 0.9937499761581421,
+      "postL_food_median": 25.0,
+      "postL_food_mean": 24.814464569091797,
+      "p25": 22.0,
+      "p75": 28.0,
+      "turn_density_postL": 0.835173487663269,
+      "death_causes_postL": {
+       "wall": 0.19811320754716982,
+       "self": 0.8018867924528302,
+       "starve": 0.0
+      }
+     },
+     "50": {
+      "n_reach": 317,
+      "reach_rate": 0.9906250238418579,
+      "postL_food_median": 15.0,
+      "postL_food_mean": 14.876971244812012,
+      "p25": 12.0,
+      "p75": 18.0,
+      "turn_density_postL": 0.812117338180542,
+      "death_causes_postL": {
+       "wall": 0.19873817034700317,
+       "self": 0.8012618296529969,
+       "starve": 0.0
+      }
+     }
+    }
+   }
+  }
+ }
+}

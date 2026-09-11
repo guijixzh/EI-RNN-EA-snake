@@ -1,0 +1,11 @@
+{
+ "generated_at": "2026-09-02 17:12:47",
+ "gates": {
+  "P1/P2 等价性": true,
+  "A1 可读性": true,
+  "A2 预测效度": true,
+  "A-cost 成本": true
+ },
+ "all_pass": true,
+ "baseline_food_a0": 42.625
+}

@@ -1,0 +1,145 @@
+{
+ "generated_at": "2026-09-02 19:48:44",
+ "g1": {
+  "diff_mean": -1.8888905843098958,
+  "rows": [
+   {
+    "banks_tag": 910,
+    "a1": 35.75,
+    "c0": 37.41666793823242,
+    "diff": -1.6666679382324219
+   },
+   {
+    "banks_tag": 911,
+    "a1": 36.33333206176758,
+    "c0": 38.91666793823242,
+    "diff": -2.5833358764648438
+   },
+   {
+    "banks_tag": 912,
+    "a1": 34.5,
+    "c0": 35.91666793823242,
+    "diff": -1.4166679382324219
+   }
+  ],
+  "pass": false
+ },
+ "g2": {
+  "ratio_l40": 0.375,
+  "ratio_l50": 0.6666666666666666,
+  "nat_food": 35.0,
+  "pass": false
+ },
+ "g3": {
+  "late_self_share": 0.8648648648648649,
+  "pass": false
+ },
+ "natural": {
+  "n": 128,
+  "food_median": 35.0,
+  "food_mean": 34.7421875,
+  "death_causes": {
+   "wall": 0.171875,
+   "self": 0.8203125,
+   "starve": 0.0078125
+  },
+  "tiers": {
+   "30": {
+    "n_reach": 117,
+    "reach_rate": 0.9140625,
+    "postL_food_median": 8.0,
+    "postL_food_mean": 7.9572649002075195,
+    "p25": 5.0,
+    "p75": 11.0,
+    "turn_density_postL": 0.20586979389190674,
+    "death_causes_postL": {
+     "wall": 0.17094017094017094,
+     "self": 0.8290598290598291,
+     "starve": 0.0
+    }
+   },
+   "40": {
+    "n_reach": 37,
+    "reach_rate": 0.2890625,
+    "postL_food_median": 2.0,
+    "postL_food_mean": 2.9189188480377197,
+    "p25": 1.0,
+    "p75": 3.0,
+    "turn_density_postL": 0.1335836797952652,
+    "death_causes_postL": {
+     "wall": 0.13513513513513514,
+     "self": 0.8648648648648649,
+     "starve": 0.0
+    }
+   },
+   "50": {
+    "n_reach": 2,
+    "reach_rate": 0.015625,
+    "postL_food_median": 4.0,
+    "postL_food_mean": 4.0,
+    "p25": 2.5,
+    "p75": 5.5,
+    "turn_density_postL": 0.12162162363529205,
+    "death_causes_postL": {
+     "wall": 0.5,
+     "self": 0.5,
+     "starve": 0.0
+    }
+   }
+  }
+ },
+ "spawned_teacher": {
+  "30": {
+   "n": 64,
+   "food_median": 7.0,
+   "food_mean": 6.828125,
+   "p25": 4.0,
+   "p75": 9.25,
+   "steps_median": 120.0,
+   "death_causes": {
+    "wall": 0.15625,
+    "self": 0.84375,
+    "starve": 0.0,
+    "censored": 0.0
+   },
+   "conn_at_death_median": 0.5,
+   "reach_at_death_median": 0.23009072244167328,
+   "trace_failed": 0
+  },
+  "40": {
+   "n": 64,
+   "food_median": 3.0,
+   "food_mean": 3.734375,
+   "p25": 1.0,
+   "p75": 5.25,
+   "steps_median": 62.5,
+   "death_causes": {
+    "wall": 0.140625,
+    "self": 0.859375,
+    "starve": 0.0,
+    "censored": 0.0
+   },
+   "conn_at_death_median": 0.3333333432674408,
+   "reach_at_death_median": 0.09210892021656036,
+   "trace_failed": 0
+  },
+  "50": {
+   "n": 64,
+   "food_median": 2.0,
+   "food_mean": 1.890625,
+   "p25": 0.0,
+   "p75": 3.0,
+   "steps_median": 31.0,
+   "death_causes": {
+    "wall": 0.28125,
+    "self": 0.71875,
+    "starve": 0.0,
+    "censored": 0.0
+   },
+   "conn_at_death_median": 0.3333333432674408,
+   "reach_at_death_median": 0.10984393954277039,
+   "trace_failed": 0
+  }
+ },
+ "verdict": "G-NULL → 信息侧该边际证伪归档，转容量解释"
+}
