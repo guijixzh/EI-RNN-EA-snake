@@ -20,10 +20,13 @@ SiNNtry/
 │   └── vis.py          可视化
 ├── test7b*.py        ★ 活跃实验线 1：GPU 进化冠军线（67 分）+ 基准脚本
 ├── test12*.py        ★ 活跃实验线 2：ego 观测重写 + 适应度 v7（含 s1/s2 前缀跑产物）
+├── test14.py         激素实验线（期相激素 v1，已结题 G1-NULL；保留作 v2 基础）
+├── test15.py         ★ 活跃实验线 3：观测增维 32→40（钟压/尾四方位/三向7步洪水稀缺）
 ├── experiments/      历史实验归档：test1..test8 及分析脚本平铺；
 │                     主题子目录 test7_series/（test7→7h）、test10_lunar/（含云端部署包）、
 │                     test11/、test13_ppo/
 ├── deploy_test12/    test12 的 AutoDL 云端部署包
+├── deploy_test15/    test15 观测增维的 AutoDL 云端部署包（cold1 断点续训）
 ├── bench/             性能基准（列数扫描 / A-B 对比 / 加速比）
 ├── tools/             实时脑活动可视化服务器（brain_visualizer + static）
 ├── models/            训练好的模型权重（test4b/5/5a/5d/6/7/8 等，含早期 LSTM 预训练）
@@ -41,8 +44,11 @@ SiNNtry/
 | `docs/test9_experiment_log.md` | 链接影响/剪枝分析 | 已结题 |
 | `docs/test10_lunar_experiment_log.md` | LunarLander 二度移植 | 云端长跑，结果未归档 |
 | `docs/test11_experiment_log.md` | 锦标赛筛选 vs 两阶段 | 已结题（保留两阶段） |
-| `docs/test12_experiment_log.md` | ego 观测 + 适应度 v7（当前主线） | 活跃 |
+| `docs/test12_experiment_log.md` | ego 观测 + 适应度 v7（当前主线） | 已结题（§7 归因终稿：后期模式缺失，转 test14） |
 | `docs/test13_ppo_experiment_log.md` | 冠军脑剪枝固化 + PPO 微调 | 已结题（判定不可行） |
+| `docs/test14_experiment_log.md` | 期相激素 v1：局内动态调制 | 已结题（G1-NULL：精英通胀非能力增益） |
+| `docs/test15_experiment_log.md` | 观测增维 32→40（信息直供 + Phase A 标定 + 温启动 A/B） | 活跃 |
+| `docs/test16b_experiment_log.md` | 评估提速 fast-eval + 阶段2 对半精评；§6 320 代终局 1000 局基准（best 62.7 略超 7b 61.4）、§7 einbrain 16 系列可视化、§8 16b vs 7b 结构对比（同连接预算/随机拓扑 vs 稠密循环）、§9 扇入扩容 K=16→32 种子续训（`experiments/expand_fanin.py`，零权补槽严格等价 + 三道自检门） | 活跃 |
 
 ## 快速上手（einbrain 包）
 
@@ -65,6 +71,17 @@ best_state, history = run_training_gpu(cfg)
 # 加载已有最优模型并游玩
 from einbrain import io, SnakeEnv, deliberate_action
 brain, food, steps = io.load_best_model_brain('test5d_best_model.pth', cfg)
+
+# 任意血统一行加载（含 test16 系列稀疏基因组，自动稠密化等价展开）
+from einbrain import io
+brain, cfg, meta = io.load_model_any('test16b_simp_best_model.pth')
+```
+
+模型可视化 CLI（兼容 test5d/6/7 稠密与 test16 系列稀疏基因组）：
+
+```bash
+python -m einbrain.vis test16b_simp_best_model.pth --play --bank-seed 7   # 游玩（16 系列走 test16b 评估语义）
+python -m einbrain.vis test16b_simp_best_model.pth --topology --matrices --save-prefix results/brain16
 ```
 
 三种训练模式的详细对比与设计动机见 `docs/test_evolution_analysis.md`。
