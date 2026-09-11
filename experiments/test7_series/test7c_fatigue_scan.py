@@ -8,8 +8,8 @@
 # ==========================================
 import os, sys, time, importlib.util
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-spec = importlib.util.spec_from_file_location('t7c', os.path.join(ROOT, 'test7c.py'))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+spec = importlib.util.spec_from_file_location('t7c', os.path.join(ROOT, 'experiments', 'test7_series', 'test7c.py'))
 t7c = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(t7c)
 

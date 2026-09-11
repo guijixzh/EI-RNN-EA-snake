@@ -6,7 +6,11 @@
 
 ```
 SiNNtry/
-├── einbrain/         ★ 经过考验有效的 EI-RNN 整合通用包（供后续调用/实验）
+├── snake_std.py      ★ 标准实现程序（根目录唯一训练入口，以 16b 为基座：三种观测环境 ×
+│                       多适应度公式 × 多筛选方案 × 激素/轮换等系统开关，
+│                       详见 docs/standard_implementation_log.md）
+├── test16b_simp_best_model.pth   ★ 当前基准模型（千局 62.67，略超 7b 61.35）
+├── einbrain/         经过考验有效的 EI-RNN 整合通用包
 │   ├── config.py       统一配置（脑/环境/进化/PPO/GPU/NEAT）
 │   ├── env.py          贪吃蛇环境（24 维射线观测） + RaySnakeEnv（32 维 8 方向观测） + ProjSnakeEnv（test7b 投影观测复刻）
 │   ├── brain.py        统一 EIBrainRegion 脑模型
@@ -17,29 +21,30 @@ SiNNtry/
 │   ├── gpu.py          GPU 全并行进化（test7 语义）+ BatchedRaySnakeEnv
 │   ├── io.py           统一保存/加载，兼容三格式模型互作种子
 │   ├── deliberation.py K 帧思考
-│   └── vis.py          可视化
-├── snake_std.py      ★ 标准实现程序（以 16b 为基座：三种观测环境 × 多适应度公式 ×
-│                       多筛选方案 × 激素/轮换等系统开关，详见 docs/standard_implementation_log.md）
-├── test7b*.py        活跃实验线 1（已归档产物）：GPU 进化冠军线（67 分）+ 基准脚本
-├── test12*.py        活跃实验线 2（已归档产物）：ego 观测重写 + 适应度 v7
-├── test14.py         激素实验线（期相激素 v1，已结题 G1-NULL；保留作 v2 基础）
-├── test15.py         活跃实验线 3：观测增维 32→40（钟压/尾四方位/三向7步洪水稀缺）
-├── test16*.py        16 系列：稀疏固定扇入基因组（16→16a LCB/自适应K2→16b fast-eval/对半
-│                     精评→16c 池约束→16c_cheat7b 固定地图通关特训）
-├── test16b_simp_best_model.pth   ★ 当前基准模型（千局 62.67，略超 7b 61.35）
+│   └── vis.py          可视化（16 系列模块自动定位 experiments/test16_series/）
 ├── artifacts/        ★ 实验产物归档（按世代分目录）：test7b/ test12/ test14/ test15/
 │                     test16/ test16a/ test16b/ test16c/ test16c_cheat7b/
 │                     存放各世代 *_best_model.pth / *_history.json|png 等
+├── experiments/      ★ 历史实验源码归档（按谱系主题子目录，脚本按仓库根相对路径运行）：
+│   ├── early/           test1..test6 全家族（含 smoke/lunar 变体）+ 早期诊断脚本
+│   ├── test7_series/    test7→7h 主线 + test7b 冠军线 + benchmark/评测 + 外围 A/B 分析
+│   ├── test8_neat/      真正 NEAT × EI-RNN
+│   ├── test10_lunar/    LunarLander 移植（含云端部署包）
+│   ├── test11/          锦标赛 vs 两阶段筛选
+│   ├── test12/          ego 观测 + 适应度 v7 主线 + 习惯/孤岛诊断
+│   ├── test13_ppo/      冠军剪枝 + PPO 微调（已结题）
+│   ├── test14/          期相激素 v1 + 激素 A/B 判定
+│   ├── test15/          观测增维 32→40 + obs40 标定/判定
+│   ├── test16_series/   test16→16a→16b→16c→16c_cheat7b + 基准/扩容/迁移/对拍
+│   └── run_seeded.py    旧脚本种子注入运行器
+├── tools/            实时脑活动可视化服务器（brain_visualizer + static，模型扫描覆盖根目录与 artifacts/）
+│   └── video/           视频制作（make_intro_video / render_win_video / tune_topology）
 ├── media/            成品视频（不入库）
-├── experiments/      历史实验归档：test1..test8 及分析脚本平铺；
-│                     主题子目录 test7_series/（test7→7h）、test10_lunar/（含云端部署包）、
-│                     test11/、test13_ppo/
 ├── deploy_test12/    test12 的 AutoDL 云端部署包
 ├── deploy_test15/    test15 观测增维的 AutoDL 云端部署包（cold1 断点续训）
 ├── bench/             性能基准（列数扫描 / A-B 对比 / 加速比）
-├── tools/             实时脑活动可视化服务器（brain_visualizer + static，模型扫描覆盖根目录与 artifacts/）
 ├── models/            训练好的模型权重（test4b/5/5a/5d/6/7/8 等，含早期 LSTM 预训练）
-├── results/           训练曲线/基准/诊断等数据与图
+├── results/           训练曲线/基准/诊断等数据与图（含 test9/ 子目录）
 ├── logs/              运行日志
 └── docs/              实验演进分析与各主题实验日志
 ```
@@ -136,22 +141,22 @@ python -m einbrain.vis test16b_simp_best_model.pth --topology --matrices --save-
 
 ## 运行历史实验
 
-历史脚本归档于 `experiments/`（test1..test8 平铺；test7 系列 / test10 /
-test11 / test13 在对应主题子目录），保持原样可复现。归档脚本中的模型/
-断点路径按当时约定解析（相对仓库根目录），从其他目录运行需自行对齐：
+历史脚本按谱系归档于 `experiments/` 主题子目录（模型/断点/产物路径按仓库根
+相对解析，**从仓库根目录运行**）：
 
 ```bash
-cd experiments
-python test5d.py                    # 最优进化版
-python test5a_smoke_test.py         # 快速自检
-python test6.py                     # PPO
-python test7_series/test7h.py --smoke   # GPU CRN 筛选版自检
-python test8.py --smoke             # 真正 NEAT × EI-RNN（K=5，32 维观测）自检
+python experiments/early/test5d.py                  # 最优 CPU 进化版
+python experiments/early/test6.py                   # PPO
+python experiments/test7_series/test7h.py --smoke   # GPU CRN 筛选版自检
+python experiments/test7_series/test7b_benchmark.py # 7b 冠军千局基准
+python experiments/test8_neat/test8.py --smoke      # 真正 NEAT × EI-RNN 自检
+python experiments/test12/test12.py --selfcheck     # ego 观测主线自检
+python experiments/test16_series/test16b.py --smoke # 16b（snake_std 的基座）自检
 ```
 
 ## test8 — 真正 NEAT 与 EI-RNN 的契合度验证
 
-`experiments/test8.py` 用**完整的 NEAT**（创新号 + 物种化/相容性距离 + 历史标记交叉 + add-connection/add-node 结构生长）驱动 EI-RNN 进化，验证二者契合度：
+`experiments/test8_neat/test8.py` 用**完整的 NEAT**（创新号 + 物种化/相容性距离 + 历史标记交叉 + add-connection/add-node 结构生长）驱动 EI-RNN 进化，验证二者契合度：
 
 - **环境**：K=5（`FRAME_RATE=5`）贪吃蛇，新 **32 维头朝向相对 8 方向观测**（`RaySnakeEnv` / `BatchedRaySnakeEnv`）：蛇首方向 4 one-hot + 蛇尾方向（末节移动朝向）4 one-hot + 食物 8 扇区 + 自身 8 扇区 + 8 方向障碍距离倒数（身后槽约定为 `sqrt(蛇身长度/格子度)`，避免冗余不变量）。
 - **启动**：256 柱 `INIT_DENSITY=0.15` 稀疏随机拓扑，为每条连接分配创新号；此后 add-connection / add-node 单调生长。
@@ -159,4 +164,4 @@ python test8.py --smoke             # 真正 NEAT × EI-RNN（K=5，32 维观测
 - **性能**：POP=1024/N=256/K=5 下每代约 10–45s（`evolve` 父本继承 + 每 `RE_SPECIATE_INTERVAL` 代全量再物种化、`SPECIES_CAP` 兜底；`obs()` 全向量化；`decode_population` 批量 scatter；断点紧凑数组）。
 - **运行**：`python test8.py --device cuda --pop 2048 --gens 100`；断点续训 / 最优模型保存 / `--play` 播放与 `einbrain.io` 完全兼容。
 
-> 注意：历史脚本中的模型/断点路径按当时约定解析（相对运行目录）。当前模型权重统一存放在 `models/`；若需在历史脚本中加载模型，请将其复制到运行目录，或改用 `einbrain.io` 的路径解析。
+> 注意：各世代产物统一归档于 `artifacts/<世代>/`（基准模型 test16b_simp_best_model.pth 留守根目录）；历史脚本按仓库根相对路径解析，从仓库根目录运行即可。

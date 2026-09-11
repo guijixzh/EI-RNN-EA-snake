@@ -29,10 +29,10 @@ import time
 import numpy as np
 import torch
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-_spec = importlib.util.spec_from_file_location('t7b', os.path.join(ROOT, 'test7b.py'))
+_spec = importlib.util.spec_from_file_location('t7b', os.path.join(ROOT, 'experiments', 'test7_series', 'test7b.py'))
 t7b = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(t7b)
 

@@ -122,19 +122,19 @@ class Engine:
 #       test16 系列（sparse1）也含 OBS_ENC_VERSION，必须排在 test12 之前，
 #       用其专有字段 BRAIN_VERSION=='sparse1' 区分。
 ENGINES = [
-    Engine("16b", "test16b.py",
+    Engine("16b", "experiments/test16_series/test16b.py",
            lambda c: c.get("BRAIN_VERSION") == "sparse1"),
-    Engine("12", "test12.py",
+    Engine("12", "experiments/test12/test12.py",
            lambda c: "OBS_ENC_VERSION" in c or "ISLAND_PENALTY" in c),
-    Engine("7g", "test7g.py", lambda c: "OBS_MANHATTAN" in c),
-    Engine("7d", "test7d.py",
+    Engine("7g", "experiments/test7_series/test7g.py", lambda c: "OBS_MANHATTAN" in c),
+    Engine("7d", "experiments/test7_series/test7d.py",
            lambda c: "TURN_COST" in c or "TURN_PENALTY" in c or
                      "ONE_SIDED_TURN_DEATH" in c),
-    Engine("7c", "test7c.py",
+    Engine("7c", "experiments/test7_series/test7c.py",
            lambda c: "FATIGUE_TURN_DECAY" in c or "FATIGUE_TURN_GAIN" in c),
-    Engine("7b", "test7b.py",
+    Engine("7b", "experiments/test7_series/test7b.py",
            lambda c: "STARVE_SLOPE" in c or "FOOD_EFF_WEIGHT" in c),
-    Engine("7a", "test7a.py",
+    Engine("7a", "experiments/test7_series/test7a.py",
            lambda c: "OBS_MODE" in c or "EVAL_BATCH" in c),
 ]
 

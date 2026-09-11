@@ -14,8 +14,8 @@
 import os, sys, time, importlib.util, math
 from collections import defaultdict, deque
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-spec = importlib.util.spec_from_file_location('t7d', os.path.join(ROOT, 'test7d.py'))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+spec = importlib.util.spec_from_file_location('t7d', os.path.join(ROOT, 'experiments', 'test7_series', 'test7d.py'))
 t7d = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(t7d)
 

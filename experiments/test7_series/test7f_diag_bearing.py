@@ -11,8 +11,8 @@
 # ==========================================
 import os, sys, time, importlib.util, math
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-spec = importlib.util.spec_from_file_location('t7f', os.path.join(ROOT, 'test7f.py'))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+spec = importlib.util.spec_from_file_location('t7f', os.path.join(ROOT, 'experiments', 'test7_series', 'test7f.py'))
 t7f = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(t7f)
 

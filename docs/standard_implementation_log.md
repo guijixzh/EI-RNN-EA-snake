@@ -111,12 +111,14 @@ $PY -X utf8 -u snake_std.py --play    # 播放 snake_std_best_model.pth（或改
 
 ## 5. 与 16 系列脚本的关系
 
-- test16b.py 保留为参考基线（`test16b_benchmark.py` 千局基准与等价对照仍在用）；
-  新实验一律从 `snake_std.py` 起步。
+- test16 系列脚本归档于 `experiments/test16_series/`（test16b.py 保留为参考基线：
+  `test16b_benchmark.py` 千局基准与等价对照仍在用，模块装载路径已指向归档位置）；
+  新实验一律从根目录 `snake_std.py` 起步。
 - test16c（池约束）/ test16c_cheat7b（固定地图+鲁棒+7b种子）的特殊机制已并入
   标准程序，但 cheat7b 的「7b 稠密→稀疏迁移器」（`load_best_state_7b_sparse`）
-  与 N=256/K=96 专属配置未并入——复现 cheat7b 请仍用原脚本（其 SEED_MODEL_PATH
-  已指向 `artifacts/test7b/`）。
+  与 N=256/K=96 专属配置未并入——复现 cheat7b 请仍用
+  `experiments/test16_series/test16c_cheat7b.py`（其 SEED_MODEL_PATH 指向
+  `artifacts/test7b/`）。
 - 轮换系统沿用 test16 的 2 代 `('G2','G1')` 默认（test5a 的 5 槽复杂轮换可用
   `--cycle-pattern` 重建）。
 

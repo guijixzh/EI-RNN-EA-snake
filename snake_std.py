@@ -3779,7 +3779,7 @@ def selfcheck(cfg):
         import importlib.util as _ilu
         _spec = _ilu.spec_from_file_location(
             'cheat7b_ref', os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                        'test16c_cheat7b.py'))
+                                        'experiments', 'test16_series', 'test16c_cheat7b.py'))
         _ref = _ilu.module_from_spec(_spec)
         sys.modules['cheat7b_ref'] = _ref
         _spec.loader.exec_module(_ref)
@@ -3811,7 +3811,7 @@ def selfcheck(cfg):
               f"{'OK' if d10 == 0.0 else 'FAIL'}")
     except Exception as e10:
         ok10 = False
-        print(f"  对拍失败（test16c_cheat7b.py 需在仓库根目录）: {e10}")
+        print(f"  对拍失败（experiments/test16_series/test16c_cheat7b.py 未找到）: {e10}")
     print(f"  32proj 等价性 {'OK' if ok10 else 'FAIL'}")
 
     # --- 自检 11：激素零初始化无操作 + 开启后确定性 ---

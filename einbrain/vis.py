@@ -497,9 +497,10 @@ def _load_test16_module():
     """定位仓库根的 test16b.py（16 系列评估语义的权威实现：obs40 + BatchedSnakeEnv）。"""
     import importlib.util
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    p = os.path.join(root, 'test16b.py')
+    p = os.path.join(root, 'experiments', 'test16_series', 'test16b.py')
     if not os.path.exists(p):
-        for alt in ('test16a.py', 'test16.py'):
+        for alt in (os.path.join('experiments', 'test16_series', 'test16a.py'),
+                        os.path.join('experiments', 'test16_series', 'test16.py')):
             p2 = os.path.join(root, alt)
             if os.path.exists(p2):
                 p = p2

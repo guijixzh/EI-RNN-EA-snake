@@ -1,8 +1,8 @@
 """test7a 模型快速基准测试：对给定模型并发跑 1000 局，输出平均吃子数等统计。"""
 import os, sys, time, argparse, importlib.util
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-spec = importlib.util.spec_from_file_location('t7a', os.path.join(ROOT, 'test7a.py'))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+spec = importlib.util.spec_from_file_location('t7a', os.path.join(ROOT, 'experiments', 'test7_series', 'test7a.py'))
 t7a = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(t7a)
 
