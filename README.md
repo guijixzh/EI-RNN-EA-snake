@@ -40,6 +40,7 @@
 - [重要结论](#重要结论)
 - [安装](#安装)
 - [快速开始](#快速开始)
+- [演示视频](#演示视频)
 - [标准实现全开关矩阵](#标准实现全开关矩阵snake_stdpy)
 - [断点续训与可复现](#断点续训与可复现)
 - [使用 einbrain 库](#使用-einbrain-库)
@@ -309,6 +310,13 @@ python tools/brain_visualizer.py          # 启动后浏览器打开本机服务
 python experiments/test16_series/test16b_benchmark.py        # 16b 基准模型 vs 7b 参照
 python experiments/test7_series/test7b_benchmark.py          # 经典 7b 冠军
 ```
+
+---
+
+## 演示视频
+
+- [Bilibili：不知为何可以工作的神经网络正在玩贪吃蛇【进化算法】](https://www.bilibili.com/video/BV1JsY26EEYx)
+  —— 7b 冠军血统（N=256 稠密 → 稀疏 K=96 迁移）的实机对局演示与设计解说。
 
 ---
 
