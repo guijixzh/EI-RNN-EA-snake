@@ -1,5 +1,15 @@
 # SiNNtry — 用神经进化训练「E-I 皮质柱脑区」玩贪吃蛇
 
+
+
+https://github.com/user-attachments/assets/c3d18a21-e45f-4509-a6dc-86efa20a5415
+
+
+
+https://github.com/user-attachments/assets/3817a994-adfd-4a78-a6a4-60c0b7f49bd5
+
+
+
 一个把**兴奋-抑制（E-I）皮质柱脑区**当作决策器官、用 GPU 全并行神经进化在贪吃蛇上
 进行实验的研究项目。项目的**进化算法框架、贪吃蛇环境与适应度设计的主要
 启发来自 [Ackeraa/snake](https://github.com/Ackeraa/snake) 的 nn_97 前馈进化蛇**
