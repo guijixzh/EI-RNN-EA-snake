@@ -552,6 +552,8 @@ python experiments/test16_series/test16c_cheat7b.py --smoke
 
 [MIT](LICENSE)
 
+第三方组件的许可与来源说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
 # AI使用声明：
 
 **请注意**本项目代码与文本主体由AI生成，经过人工初步核查但仍需要仔细甄别内容正误。
