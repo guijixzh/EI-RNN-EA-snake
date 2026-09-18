@@ -1,7 +1,7 @@
 # ==========================================
 # experiments/ref_solver.py —— 理想参考解法器（chynl/snake GraphAgent 移植）+ CRN mini-env
 #
-# 参考蛇算法（chuyangliu/chynl 系）：
+# 参考蛇算法（chynl/snake 系，MIT License — 见 third_party/chynl/LICENSE）：
 #   1. BFS 最短路去食物 + 前向检查：模拟吃完后仍能 BFS 到尾才走；
 #   2. 不安全 → longer_path（侧绕一格加长绕行等尾腾位，3 步换 1 步）；
 #   3. 仍无路 → 远离食物苟活；

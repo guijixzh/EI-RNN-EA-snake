@@ -197,4 +197,4 @@ test5d (CPU 进化最优版, experiments/test5d.py)
   test7h_weakconn_mask 等 .json/.png。
 - 日志：`logs/test7h_run52_102.log`、`logs/test7h_run103_153.log`、
   `logs/test7h_imitC_run140_240.log`、`logs/test7h_fullsize_verify.log`。
-- 外部参照：`third_party/ackeraa/`（含 nn_97.pth）。
+- 外部参照（本地）：Ackeraa/snake 的 nn_97。上游未声明许可证，代码与权重不随本仓库分发——复现请从上游获取后放入 `third_party/ackeraa/`（Git 忽略）。

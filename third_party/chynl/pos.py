@@ -1,3 +1,7 @@
+# Vendored from chynl/snake (https://github.com/chynl/snake)
+# SPDX-License-Identifier: MIT
+# Full license text: third_party/chynl/LICENSE
+
 from src.direc import Direction
 
 

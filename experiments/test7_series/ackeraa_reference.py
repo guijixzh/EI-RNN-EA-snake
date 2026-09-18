@@ -10,6 +10,11 @@
 #  - 可视化：两玩家在食物数 15/25/35/N 的棋盘+路径对比 PNG；
 #  - 若参考蛇无钟也大面积早死/到不了 N → 停下问用户，不自行改设计。
 # 产出：results/ackeraa_reference.json / ackeraa_vs_7h_boards.png / ackeraa_vs_7h_paths.png
+#
+# 来源与许可：参考实现与权重来自 Ackeraa/snake（https://github.com/Ackeraa/snake）。
+# 上游未声明许可证（默认保留所有权利），故其代码与权重不随本仓库分发；运行本脚本前
+# 请自行从上游获取 nn.py / nn_97.pth 等文件并放入 third_party/ackeraa/（.gitignore 忽略），
+# 或用环境变量 ACKERAA_DIR 指向本地目录。
 # ==========================================
 import importlib.util
 import json
@@ -36,8 +41,25 @@ ACK_DIRS = [(-1, 0), (1, 0), (0, -1), (0, 1)]      # 0上 1下 2左 3右
 OUR_DIR_IDX = {(0, 1): 0, (1, 0): 1, (0, -1): 2, (-1, 0): 3}   # test7h DIRS 表
 
 
-def load_ackeraa_net(path):
-    spec = importlib.util.spec_from_file_location('nn', os.path.join(ROOT, 'third_party/ackeraa/nn.py'))
+ACKERAA_DIR = os.environ.get('ACKERAA_DIR', os.path.join(ROOT, 'third_party', 'ackeraa'))
+
+
+def require_ackeraa_files():
+    """返回 (nn.py, nn_97.pth) 的本地路径；缺失时给出获取说明并退出。"""
+    nn_py = os.path.join(ACKERAA_DIR, 'nn.py')
+    weights = os.path.join(ACKERAA_DIR, 'nn_97.pth')
+    missing = [p for p in (nn_py, weights) if not os.path.exists(p)]
+    if missing:
+        print('[缺失] Ackeraa 参考实现/权重未随本仓库分发（上游未声明许可证）：')
+        print('        https://github.com/Ackeraa/snake')
+        print(f'       请将 nn.py / nn_97.pth 放到 {ACKERAA_DIR}，')
+        print('       或设置环境变量 ACKERAA_DIR 指向本地目录后重试。')
+        sys.exit(1)
+    return nn_py, weights
+
+
+def load_ackeraa_net(nn_py, path):
+    spec = importlib.util.spec_from_file_location('nn', nn_py)
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     sys.modules['nn'] = m
@@ -237,7 +259,8 @@ def main():
     banks = t7h.make_banks(base, 777, 1, EPS, DEV)
 
     print(f'[参考蛇] Ackeraa nn_97（免饿死钟），{EPS} 库 ...')
-    net = load_ackeraa_net(os.path.join(ROOT, 'third_party/ackeraa/nn_97.pth'))
+    nn_py, weights = require_ackeraa_files()
+    net = load_ackeraa_net(nn_py, weights)
     rlogs = rollout_reference(base, banks, net)
     rfood = [len(l['events']) for l in rlogs]
     rdied = [l['died'] for l in rlogs]
