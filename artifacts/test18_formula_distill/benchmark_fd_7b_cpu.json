@@ -1,0 +1,90 @@
+{
+  "protocol": {
+    "obs": "32proj",
+    "starve": 3.0,
+    "episodes": 50,
+    "seed": 20260913
+  },
+  "models": {
+    "test18a_fd_7b_best_model": {
+      "episodes": 50,
+      "food_mean": 38.44,
+      "food_median": 38.0,
+      "food_std": 6.590531241168373,
+      "food_min": 15,
+      "food_max": 53,
+      "ge62": 0,
+      "ge80": 0,
+      "ge90": 0,
+      "perfect98": 0,
+      "death_wall": 15,
+      "death_self": 34,
+      "death_starve": 1,
+      "onpolicy_agree_by_layer": [
+        0.8213032581453634,
+        0.7703679897155713,
+        0.75776631870205,
+        0.0,
+        0.0
+      ],
+      "onpolicy_layer_coverage": [
+        0.16361176036412842,
+        0.5103538770656497,
+        0.32603436257022184,
+        0.0,
+        0.0
+      ],
+      "onpolicy_agree_total": 0.774593020871776,
+      "runtime_sec": 30.565253734588623,
+      "checkpoint_food": 40.16666793823242,
+      "bank_agree_total": 0.83349609375,
+      "bank_agree_by_layer": {
+        "0": 0.8700000047683716,
+        "1": 0.8510000109672546,
+        "2": 0.800000011920929,
+        "3": 0.8271428346633911,
+        "4": 0.7432432174682617
+      }
+    },
+    "test18a_fd_7b_latest_gen_best": {
+      "episodes": 50,
+      "food_mean": 34.48,
+      "food_median": 36.0,
+      "food_std": 10.999517614654836,
+      "food_min": 2,
+      "food_max": 57,
+      "ge62": 0,
+      "ge80": 0,
+      "ge90": 0,
+      "perfect98": 0,
+      "death_wall": 6,
+      "death_self": 40,
+      "death_starve": 4,
+      "onpolicy_agree_by_layer": [
+        0.7894736842105263,
+        0.794264943457189,
+        0.7625521604522816,
+        0.0,
+        0.0
+      ],
+      "onpolicy_layer_coverage": [
+        0.180091059602649,
+        0.5124172185430463,
+        0.3074917218543046,
+        0.0,
+        0.0
+      ],
+      "onpolicy_agree_total": 0.7836506622516556,
+      "runtime_sec": 25.07910919189453,
+      "checkpoint_food": 39.41666793823242,
+      "bank_agree_total": 0.82861328125,
+      "bank_agree_by_layer": {
+        "0": 0.85916668176651,
+        "1": 0.8560000061988831,
+        "2": 0.801111102104187,
+        "3": 0.8185714483261108,
+        "4": 0.7195945978164673
+      }
+    }
+  }
+}

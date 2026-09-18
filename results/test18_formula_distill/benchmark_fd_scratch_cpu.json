@@ -1,0 +1,50 @@
+{
+  "protocol": {
+    "obs": "32proj",
+    "starve": 3.0,
+    "episodes": 50,
+    "seed": 20260913
+  },
+  "models": {
+    "test18a_fd_scratch_best_model": {
+      "episodes": 50,
+      "food_mean": 0.74,
+      "food_median": 0.0,
+      "food_std": 1.306342455960495,
+      "food_min": 0,
+      "food_max": 6,
+      "ge62": 0,
+      "ge80": 0,
+      "ge90": 0,
+      "perfect98": 0,
+      "death_wall": 49,
+      "death_self": 0,
+      "death_starve": 1,
+      "onpolicy_agree_by_layer": [
+        0.6066666666666667,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "onpolicy_layer_coverage": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "onpolicy_agree_total": 0.6066666666666667,
+      "runtime_sec": 3.512064218521118,
+      "checkpoint_food": 0.0833333358168602,
+      "bank_agree_total": 0.7958984375,
+      "bank_agree_by_layer": {
+        "0": 0.8100000023841858,
+        "1": 0.8220000267028809,
+        "2": 0.7722222208976746,
+        "3": 0.7928571701049805,
+        "4": 0.7297297120094299
+      }
+    }
+  }
+}

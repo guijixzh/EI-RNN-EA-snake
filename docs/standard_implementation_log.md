@@ -24,7 +24,7 @@
 | 观测环境 | `--obs 40 / 32ego / 32proj / 24` | test15/16 系（40tailflood1）／test12（32ego1）／test7b（32proj7b）／test7（休眠） |
 | 适应度公式 | `--fit-mode econ / simple / tuple` ＋ `--robust-eval R` ＋ `--te-elite N` ＋ LCB `--sel-lcb/--sel-cv` | test12 v7／test7b v9／test7 词典序／16c_cheat7b v20／7h 配额／16a v8 |
 | 筛选方案 | `--no-stage2`（单阶段）／默认二阶段／`--stage2-halving`（对半精评）／`--no-k2-adapt` 等（自适应K2） | test7g／test7h v2→test16／test16b B 层／test16a |
-| 系统开关 | `--train-hormone` ＋ `--cycle-pattern` ＋ `--pools` ＋ `--fixed-map` ＋ 疲劳/CRN/弱掩码/单侧判死/fast-eval | einbrain brain+dynamics 批量移植／test5a 轮换／test16c／16c_cheat7b／test7 系 |
+| 系统开关 | `--train-hormone` ＋ `--cycle-pattern` ＋ `--pools` ＋ `--fixed-map` ＋ 疲劳/CRN/弱掩码/单侧判死/fast-eval；**研究选项（test17 系列，默认关）**：`--kframe-input/--kframe-read`（K帧首帧输入/尾帧读出消融）＋ `--euler-leak`（E 泄漏积分器，st σ迹负反馈，τ≤1）＋ `--train-wii/--train-wee`（I/E 对称自项基因） | einbrain brain+dynamics 批量移植／test5a 轮换／test16c／16c_cheat7b／test7 系／test17+17A+17B'（见 docs/test17_kft_experiment_log.md，fork `experiments/test17_kft/test17b_leak.py` 为血统源） |
 
 ## 2. 开关矩阵（标准命令）
 
@@ -95,8 +95,8 @@ $PY -X utf8 -u snake_std.py --play    # 播放 snake_std_best_model.pth（或改
 
 ## 4. 验证记录（2026-09-12，env_torch / RTX 5070 Laptop）
 
-### 4.1 自检 `--selfcheck`（14 组全过）
-原 16b 8 组（食物编码/习惯三因素/单侧判死/v7 公式+杠杆+分解/变异分布/弱掩码/CRN 确定性/稀疏-稠密前向等价/重连变异/LCB/`_obs40_fast`≡`_obs40`）＋ 新增 6 组：
+### 4.1 自检 `--selfcheck`（18 组全过；2026-09-12 test17→17A→17B' 逐次增补 15/16/17/18 组）
+原 16b 8 组（食物编码/习惯三因素/单侧判死/v7 公式+杠杆+分解/变异分布/弱掩码/CRN 确定性/稀疏-稠密前向等价/重连变异/LCB/`_obs40_fast`≡`_obs40`）＋ 新增 8 组：
 
 | # | 检查 | 结果 |
 |---|---|---|
@@ -106,19 +106,41 @@ $PY -X utf8 -u snake_std.py --play    # 播放 snake_std_best_model.pth（或改
 | 12 | 鲁棒评估机制：σ=0 时 R=2 ≡ R=1 逐位；σ>0 副本行为差异 3.9e+01 > 0 | ✅ |
 | 13 | 池约束完整性：初始化 + 全强度变异后池外非零 = 0/0 | ✅ |
 | 14 | 固定地图：FIXED_MAP 跨代同流 / 关闭后跨代换流 | ✅ |
+| 15 | test17 K帧消融：first+tail ≡ 手写参考循环逐位；decay+sum ≡ 原公式逐位（FATIGUE_TURN_GAIN=0.5 覆盖 press 置零支路）；四模式动作非退化 | ✅ |
+| 16 | test17A w_ii/自连：off 不分配 pack 无键/同 seed 核心一致；零 w_ii ≡ 无 w_ii 逐位；非零确定性 + I 状态差异 + 二帧 logits 差异 >0；自连开启全强度重连自环 >0 且无越界（自检6 同步条件化） | ✅ |
+| 17 | test17B' E 泄漏积分器：保留比值（first 调度尾/首 ≈0.10，对照旧架构 ~1e-5）；零输入 200 帧有界；st σ迹负反馈生效且方向正确（高 st→小 τ→E 增长更慢）；st∈[0,1] 有界；确定性；τclamp≤1 | ✅ |
+| 18 | test17B' E 对称自项 w_ee：off 不分配/同 seed 核心一致；零 w_ee ≡ 无 w_ee 逐位；非零确定性 + 生效差异 >0；individual_state 往返 | ✅ |
 
-### 4.2 冒烟矩阵（--smoke 3 代端到端，11 项全过）
-默认(=16b)、`--obs 32ego`、`--obs 32proj`、`--train-hormone --cycle-pattern G1,G2,G3`、`--robust-eval 2`、`--pools`、`--fixed-map`、`--no-stage2`、`--fit-mode simple`、`--fit-mode tuple`、`--no-stage2-halving`——全部训练完成、checkpoint/best/history 落盘正确。
-（注：连续冒烟共用 `snake_std_smoke_*` 文件时会触发激素断点守卫拦截——守卫按设计工作，矩阵用 `--name` 隔离后全过。）
+### 4.2 冒烟矩阵（--smoke 3 代端到端，14 项全过）
+默认(=16b)、`--obs 32ego`、`--obs 32proj`、`--train-hormone --cycle-pattern G1,G2,G3`、`--robust-eval 2`、`--pools`、`--fixed-map`、`--no-stage2`、`--fit-mode simple`、`--fit-mode tuple`、`--no-stage2-halving`、`--kframe-input first --kframe-read tail`（test17）、`--allow-self-conn --train-wii`（test17A）、`--euler-leak --train-wii --train-wee`（test17B'）——全部训练完成、checkpoint/best/history 落盘正确。
+（注：连续冒烟共用 `snake_std_smoke_*` 文件时会触发激素/开关断点守卫拦截——守卫按设计工作，矩阵用 `--name` 隔离后全过。）
 
 ### 4.3 等价门（显式 16b 口径 = 16b 行为；2026-09-12 默认回调前为默认配置）
 `snake_std.py --smoke --seed 42 --obs 40 --columns 1024 --fanin 16 --fit-mode econ`
-vs `test16b.py --smoke --seed 42`：history 的
-`best_food / avg_food / best_fit / best_seen / elite_food` 全轨迹逐位一致 → **PASS**。
+vs `test16b.py --smoke --seed 42 --columns 1024 --fanin 16 --fit-mode econ`：history 的
+`best_food / avg_food / best_fit / best_seen / elite_food` 全轨迹逐位一致 → **PASS**（test17/17A/17B' 合并后复跑仍 PASS）。
+
+**移植保真门（test17B' 合并验证）**：`snake_std.py --smoke --euler-leak --train-wii
+--train-wee`（其余同上，`--name` 隔离）vs 血统源 `experiments/test17_kft/test17b_leak.py`
+同口径冒烟：history 五轨迹逐位一致 → **PASS**——标准实现的研究选项与实验 fork 数值完全等价。
 
 ### 4.4 向后兼容
 - `--resume-pop test16b_smoke_checkpoint.pth`：16b 断点（gen3）导入 → 续训至 gen5 ✅
 - `--play` 加载基准模型 `test16b_simp_best_model.pth`（千局 62.67）：正常游玩（200 步 Food=12，截断口径）✅
+
+### 4.5 示例种子权重与 7b 血统直读（2026-09-12 test17B' 合并后增补）
+
+- **根目录示例权重**：`cheat7b_win_model.pth`（后训练/特化，稀疏 K=96 直读）、
+  `test7b_base_model.pth`（7b 基模，稠密基因组）。`load_seed_state_any` 为
+  `--seed-model` / `--play`（新增 `--play-model` 任意路径）统一入口：稀疏格式
+  走原守卫直读；7b 稠密（W_rec/M_rec）自动走 `load_best_state_7b_dense_as_sparse`
+  转换（算法移植自 test16c_cheat7b：掩码内 top-|W| 防幽灵 + 无自连重定向），
+  要求 `--obs 32proj`。7b 基模转换**无损**（行非零 max 67 ≤ K=96）。
+- 保真实测（标准实现全路径，10 局随机图）：test7b 基模 54.6 食（千局 61.4 同水位）、
+  cheat7b 68.0 食（千局重评 63.2/中位 74 同水位）。
+- 已知特性：cheat7b 在个别随机图有零分盘（README 结论 1 已记录的特化尾部代价）；
+  以它为种子的单图微型冒烟可能恰好命中零分盘（gen0/stage1/ep0 即一例，
+  ep1-3 同引擎 28-30 食），非机制缺陷。
 
 ## 5. 与 16 系列脚本的关系
 

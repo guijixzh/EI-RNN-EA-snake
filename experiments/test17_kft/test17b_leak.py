@@ -1,4 +1,17 @@
 # ==========================================
+# test17b_leak.py —— test17B 实验B fork：E 泄漏积分器（血统 = snake_std 逐字复制）
+#
+# 【实验B改动（--euler-leak 开启；关闭时与 snake_std 逐位一致，保真自证=冒烟对拍）】
+#   E = σ(输入 − Wei·I + Wrec·E) + τ·E_old      （τ 从 sigmoid 内移到外：泄漏积分器，
+#                                               τ·E_old 为每帧增益恰 τ 的恒等信息通路，
+#                                               尾帧保留率 ≈ τ^零输入帧数）
+#   I = σ(Wii·I_old + Wie·E)                     （复用 test17A 的 w_ii 基因，零初始化硬门）
+#   τ 上限暂定 1.0（--euler-leak 时 TAU_E_MAX 收到 1.0）；τ=1 纯积分器，σ(·)≥0 使 E
+#   单调不降，超长局有 fp16 溢出理论风险（init 0.7 距上限 6σ，实验规模内无虞）。
+#   st 短期迹调制关闭（E 可达 1/(1−τ)≈∞ 量级，旧 ±0.2 调制会把 tau clamp 到 0 杀死
+#   泄漏）；st 照常计算返回，状态元组不变。
+#   FITNESS_VERSION=25（flag on）；断点守卫加 EULER_LEAK 一致性硬停。
+#
 # snake_std.py —— 贪吃蛇进化标准实现程序（以 test16b 为基座）
 #
 # 定位：把 16 系列全部已验证机制收敛为单一可配置入口，四种能力面全部
@@ -50,9 +63,8 @@
 #   其余：--turn-gain 疲劳 / --no-crn CRN / --weak-mask-frac 弱连接屏蔽 /
 #         --no-one-sided-death / --no-fast-eval / --seed 等（同 test16b）
 #
-# 输出前缀 snake_std_*；FITNESS_VERSION：simple=9（默认）/ econ=8 / 开启激素=22 /
-#   鲁棒评估=21 / K帧首帧输入或尾帧读出=23 / w_ii或自连=24 / E泄漏积分器=27
-#   （口径变化时 best 追踪自动重置）。
+# 输出前缀 test17b_*（fork）；FITNESS_VERSION：simple=9（默认）/ econ=8 / 开启激素=22 /
+#   鲁棒评估=21 / K帧首帧输入或尾帧读出=23 / w_ii或自连=24（口径变化时 best 追踪自动重置）。
 # ==========================================
 
 import argparse
@@ -225,7 +237,7 @@ class Config:
     W_II_MUT_STD = 0.1
     W_II_MIN = -6.0
     W_II_MAX = 6.0
-    # test17B'：E 对称自项 w_ee（对角，G2 第 5 基因，进 σ 内，与 I 方程的
+    # test17B'（修订）：E 对称自项 w_ee（对角，G2 第 5 基因，进 σ 内，与 I 方程的
     # w_ii·I 对称）。零初始化硬门：w_ee≡0 时 E_new = σ(total−w_ei·I)+τ·E 与 B 原式一致
     W_EE_MUT_STD = 0.1
     W_EE_MIN = -6.0
@@ -247,11 +259,12 @@ class Config:
     # 读出 'sum'=K 帧 logits 求和 argmax（默认）；'tail'=仅尾帧 logits argmax。
     KFRAME_INPUT_MODE = 'decay'
     KFRAME_READ = 'sum'
-    # --- test17B'（实验B'修订版）：E 泄漏积分器（默认关=与历史口径逐位一致）。
-    # E = σ(输入 − Wei·I + Wrec·E + w_ee·E) + τ·E_old（τ 外置=泄漏积分器，
-    # τ·E_old 为每帧增益恰 τ 的恒等信息通路）；τ 上限 1.0；st 为 σ 驱动迹负反馈
-    # （驱动上升→τ 小，被抑制下降→τ 大；σ 迹 ∈[0,1] 规避 E~1/(1−τ) 量级失配）---
+    # --- test17B：E 泄漏积分器（本 fork 专用；默认关=与 snake_std 逐位一致）---
     EULER_LEAK = False
+    # --- 实验C：食物瞥见 POMDP（--obs-glimpse G；0=关）。食物方位通道 [8:16] 仅在
+    # 食物刷新后前 G 步可见（复用 steps_wo_food 计数），其后清零——反应式策略失去
+    # 全部食物信息，须把瞥见位置写入状态并靠自身运动积分导航（需要长记忆）---
+    OBS_GLIMPSE = 0
 
     # --- 进化筛选策略 ---
     LONG_SNAKE_SCORE_THRESHOLD = 3.0
@@ -294,10 +307,10 @@ class Config:
     PRINT_HISTORY_EVERY = 1
 
     # --- 断点 / 最优模型 / 种子 ---
-    CHECKPOINT_PATH = 'snake_std_checkpoint.pth'
-    BEST_MODEL_PATH = 'snake_std_best_model.pth'
-    LATEST_GEN_BEST_MODEL_PATH = 'snake_std_latest_gen_best.pth'
-    HISTORY_JSON_PATH = 'snake_std_history.json'
+    CHECKPOINT_PATH = 'test17b_checkpoint.pth'
+    BEST_MODEL_PATH = 'test17b_best_model.pth'
+    LATEST_GEN_BEST_MODEL_PATH = 'test17b_latest_gen_best.pth'
+    HISTORY_JSON_PATH = 'test17b_history.json'
     AUTO_RESUME = True
     CHECKPOINT_INTERVAL = 10
     SEED_FROM_BEST = False
@@ -1052,12 +1065,19 @@ class BatchedSnakeEnv:
     # ---------- 观测（--obs 三环境派发；32ego=obs40 前 32 通道，32proj=7b 投影）----------
     def obs(self):
         if self.mode24:
-            return self._obs24()
-        if self.mode32proj:
-            return self._obs32_fast() if self.fast_obs else self._obs32()
-        if self.fast_obs:
-            return self._obs40_fast()
-        return self._obs40()
+            o = self._obs24()
+        elif self.mode32proj:
+            o = self._obs32_fast() if self.fast_obs else self._obs32()
+        else:
+            o = self._obs40_fast() if self.fast_obs else self._obs40()
+        g = int(getattr(self.cfg, 'OBS_GLIMPSE', 0))
+        if g > 0 and not self.mode24 and not self.mode32proj:
+            # 实验C：食物方位通道 [8:16] 仅在食物刷新后前 G 步可见
+            # （steps_wo_food 即食物刷新后步数：吃食/重置清零、否则每步+1）
+            gate = torch.ones_like(o)
+            gate[:, 8:16] = (self.steps_wo_food < g).float().unsqueeze(1)
+            o = o * gate
+        return o
 
     def _sector_offset_table(self):
         """[4,8,G,2] 射线偏移表（惰性构建一次）：d8 顺序同 _obs40
@@ -2781,74 +2801,6 @@ def load_migratable_state(path, cfg):
     return None
 
 
-def load_best_state_7b_dense_as_sparse(path, cfg, verbose=True):
-    """7b 稠密基因组（test7b 基模，W_rec/M_rec [N,N]）→ 16 稀疏固定扇入转换器
-    （test16c_cheat7b 血统算法；无损条件：每行掩码内非零 ≤ K）。
-
-    - M_rec/W_rec → 每行取**掩码内** |W| 最强的 K 个源作 rec_idx/rec_w（先乘掩码
-      再 topk，防掩码外幽灵权重）；多余槽位权重 0=断开，可被后续变异激活。
-    - M_in/W_in/M_out/W_out/b_out/tau_e/w_ei/w_ie 形状原生匹配（7b 血统 N/O 同构）。
-    - 7b 为 32proj 观测血统：要求当前 cfg.OBS_MODE=='32proj'。
-    返回 (state dict, food, steps) 或 None。"""
-    if not path or not os.path.exists(path):
-        return None
-    try:
-        data = torch.load(path, map_location='cpu', weights_only=False)
-    except Exception as e:
-        if verbose:
-            print(f"  [Seed7b] 模型 {path} 读取失败 ({e})")
-        return None
-    st = data.get('brain')
-    if st is None or 'M_rec' not in st or 'W_rec' not in st or 'rec_idx' in st:
-        return None                       # 不是 7b 稠密格式（交给调用方报错）
-    saved = data.get('config', {})
-    if saved.get('NUM_COLUMNS') != cfg.NUM_COLUMNS or saved.get('OBS_DIM') != cfg.OBS_DIM:
-        if verbose:
-            print(f"  [Seed7b] 维度不匹配（7b 血统 N=256/OBS=32）: "
-                  f"N={saved.get('NUM_COLUMNS')} OBS={saved.get('OBS_DIM')}")
-        return None
-    if getattr(cfg, 'OBS_MODE', '') != '32proj':
-        if verbose:
-            print("  [Seed7b] 7b 为 32proj 观测血统——请以 --obs 32proj 运行后重试")
-        return None
-    N, K = cfg.NUM_COLUMNS, int(cfg.REC_FANIN)
-    M_rec = (st['M_rec'] > 0)
-    W_rec = st['W_rec'].float()
-    W_eff = W_rec * M_rec.float()         # 掩码内有效权重（防幽灵，见 test16c 注释）
-    nz_row = M_rec.sum(dim=1).float()
-    _, rec_idx = torch.topk(W_eff.abs(), k=K, dim=1)
-    rec_w = W_eff.gather(1, rec_idx)      # 掩码外槽位恒 0
-    ar = torch.arange(N).view(N, 1)
-    self_slot = rec_idx == ar             # 无自连不变式：对角槽位重定向（权重置 0）
-    rec_idx = torch.where(self_slot, (ar + 1) % N, rec_idx)
-    rec_w = torch.where(self_slot, torch.zeros_like(rec_w), rec_w)
-    n_trunc = int((nz_row > K).sum())
-    if verbose:
-        print(f"  [Seed7b] 稠密→稀疏转换: N={N} K={K} | 掩码密度 {M_rec.float().mean():.3f}"
-              f" | 行非零 mean={nz_row.mean():.1f} max={int(nz_row.max())}"
-              f" | 超限行 {n_trunc}"
-              f"{'（无损）' if n_trunc == 0 else '（近似：top-|W| 截断）'}")
-    out = {
-        'N': N, 'K': K,
-        'M_in': st['M_in'].clone(), 'M_out': st['M_out'].clone(),
-        'W_in': st['W_in'].float().clone(), 'W_out': st['W_out'].float().clone(),
-        'b_out': st['b_out'].float().clone(),
-        'rec_idx': rec_idx, 'rec_w': rec_w,
-        'tau_e_init': st['tau_e_init'].float().clone(),
-        'w_ei': st['w_ei'].float().clone(), 'w_ie': st['w_ie'].float().clone(),
-    }
-    return out, float(data.get('food', -1.0)), float(data.get('steps', 0.0))
-
-
-def load_seed_state_any(path, cfg, verbose=True):
-    """种子/播放统一入口：16 稀疏格式直读（load_best_state 守卫）；7b 稠密
-    基因组自动转换注入（根目录示例权重 test7b_base_model.pth 等）。"""
-    res = load_best_state(path, cfg)
-    if res is not None:
-        return res
-    return load_best_state_7b_dense_as_sparse(path, cfg, verbose)
-
-
 def save_best_model(path, st, cfg, food, seen, unseen):
     parent = os.path.dirname(os.path.abspath(path))
     if parent:
@@ -3004,16 +2956,16 @@ def load_checkpoint7(path, cfg):
                  f'(TRAIN_WII={getattr(cfg, "TRAIN_WII", False)}, '
                  f'ALLOW_SELF_CONN={getattr(cfg, "ALLOW_SELF_CONN", False)}) 不符——'
                  f'请对齐 --train-wii/--allow-self-conn 后续训')
-    # test17B' 守卫：EULER_LEAK 改变 E 方程语义 → 不一致硬停（缺键视为 False）
-    s_el = bool(saved_cfg.get('EULER_LEAK', False))
-    if saved_cfg and s_el != bool(getattr(cfg, 'EULER_LEAK', False)):
-        sys.exit(f'[错误] 断点 {path} EULER_LEAK={s_el} 与当前 run '
-                 f'{getattr(cfg, "EULER_LEAK", False)} 不符——请对齐 --euler-leak 后续训')
     # test17B' 守卫：TRAIN_WEE 改变 E 方程语义 → 不一致硬停（缺键视为 False）
     s_we = bool(saved_cfg.get('TRAIN_WEE', False))
     if saved_cfg and s_we != bool(getattr(cfg, 'TRAIN_WEE', False)):
         sys.exit(f'[错误] 断点 {path} TRAIN_WEE={s_we} 与当前 run '
                  f'{getattr(cfg, "TRAIN_WEE", False)} 不符——请对齐 --train-wee 后续训')
+    # 实验C 守卫：OBS_GLIMPSE 改变观测语义 → 不一致硬停（缺键视为 0）
+    s_g = int(saved_cfg.get('OBS_GLIMPSE', 0))
+    if saved_cfg and s_g != int(getattr(cfg, 'OBS_GLIMPSE', 0)):
+        sys.exit(f'[错误] 断点 {path} OBS_GLIMPSE={s_g} 与当前 run '
+                 f'{getattr(cfg, "OBS_GLIMPSE", 0)} 不符——请对齐 --obs-glimpse 后续训')
     return data
 
 
@@ -3163,7 +3115,8 @@ def run_training(cfg):
           f"w_ii={bool(getattr(cfg, 'TRAIN_WII', False))}"
           f"w_ee={bool(getattr(cfg, 'TRAIN_WEE', False))} | "
           f"euler-leak={bool(getattr(cfg, 'EULER_LEAK', False))}"
-          f"(TAU_MAX={getattr(cfg, 'TAU_E_MAX', 2.0)})")
+          f"(TAU_MAX={getattr(cfg, 'TAU_E_MAX', 2.0)}) | "
+          f"glimpse={int(getattr(cfg, 'OBS_GLIMPSE', 0))}")
     if cfg.OBS_DIM >= 40:
         print(f"[新通道] enabled={cfg.OBS_NEW_ENABLED} scale={cfg.OBS_NEW_SCALE} "
               f"flood_depth={cfg.FLOOD_DEPTH} tail_block={cfg.FLOOD_TAIL_BLOCK}")
@@ -3227,7 +3180,8 @@ def run_training(cfg):
                       'rec_nz', 'rec_edges', 'rec_newmass',
                       'rec_newmass_pop', 'rec_newmass_popmax', 'rec_newnz_pop',
                       'tau_mean', 'tau_std', 'wei_mean', 'wei_std',
-                      'wie_mean', 'wie_std', 'wii_mean', 'wii_std'):
+                      'wie_mean', 'wie_std', 'wii_mean', 'wii_std',
+                      'wee_mean', 'wee_std'):
                 pad = len(history.get('gen', [])) - len(history[k])
                 if pad > 0:
                     history[k].extend([None] * pad)
@@ -3269,7 +3223,7 @@ def run_training(cfg):
             if bool(getattr(cfg, 'SEED_MIGRATE', False)):
                 seed = load_migratable_state(cfg.SEED_MODEL_PATH, cfg)
             else:
-                seed = load_seed_state_any(cfg.SEED_MODEL_PATH, cfg)
+                seed = load_best_state(cfg.SEED_MODEL_PATH, cfg)
             if seed is not None:
                 st, s_food, s_steps = seed
                 if bool(getattr(cfg, 'SEED_POP', False)):
@@ -3530,7 +3484,7 @@ def run_training(cfg):
 
 def play_best(cfg, max_steps=300):
     """加载最优模型并在 GPU 上播放一局（打印 ASCII 棋盘）。"""
-    res = load_seed_state_any(cfg.BEST_MODEL_PATH, cfg)
+    res = load_best_state(cfg.BEST_MODEL_PATH, cfg)
     if res is None:
         print("无最优模型可播放")
         return
@@ -4046,7 +4000,8 @@ def selfcheck(cfg):
         import importlib.util as _ilu
         _spec = _ilu.spec_from_file_location(
             'cheat7b_ref', os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                        'experiments', 'test16_series', 'test16c_cheat7b.py'))
+                                        '..', '..', 'experiments', 'test16_series',
+                                        'test16c_cheat7b.py'))
         _ref = _ilu.module_from_spec(_spec)
         sys.modules['cheat7b_ref'] = _ref
         _spec.loader.exec_module(_ref)
@@ -4436,7 +4391,7 @@ def selfcheck(cfg):
           f"st∈[0,1]有界: {st_bound_ok} | 确定性: {det_ok} | τclamp: {clamp_ok} "
           f"{'OK' if ok17 else 'FAIL'}")
 
-    print("=== 自检 18（test17B'）：E 对称自项 w_ee ===")
+    print("=== 自检 19（test17B'）：E 对称自项 w_ee ===")
     sc19 = Config()
     sc19.NUM_COLUMNS, sc19.REC_FANIN = 32, 16
     sc19.OBS_DIM, sc19.ACTION_DIM = 40, 3
@@ -4489,16 +4444,56 @@ def selfcheck(cfg):
     p19c.set_individual_from_state(0, st19rt)
     p19c.refresh_eff()
     rt19 = torch.equal(p19c.w_ee[0], st19rt['w_ee'].float().to(p19c.device))
-    ok18 = has_off and zero_init and same_core and eq_zero19 and det19 and diff19 and rt19
+    ok19 = has_off and zero_init and same_core and eq_zero19 and det19 and diff19 and rt19
     print(f"  分配/零初始化/同seed核心一致: {has_off and zero_init and same_core} | "
           f"零w_ee≡无w_ee逐位: {eq_zero19} | 非零确定性: {det19} | "
-          f"生效差异>0: {diff19} | 往返: {rt19} {'OK' if ok18 else 'FAIL'}")
+          f"生效差异>0: {diff19} | 往返: {rt19} {'OK' if ok19 else 'FAIL'}")
+
+    print("=== 自检 18（实验C）：食物瞥见门控 ===")
+    sc18 = Config()
+    sc18.OBS_MODE = '32ego'
+    sc18.OBS_DIM = 32
+    sc18.OBS_GLIMPSE = 3
+    sc18.DEVICE = 'cpu'
+    sc18.FAST_EVAL = False
+    sc18_o = Config()
+    sc18_o.OBS_MODE = '32ego'
+    sc18_o.OBS_DIM = 32
+    sc18_o.DEVICE = 'cpu'
+    sc18_o.FAST_EVAL = False                           # OBS_GLIMPSE=0（关）
+    bank18 = make_bank(sc18, 555, 9, 0, 'cpu')
+    env_g = BatchedSnakeEnv(sc18, 2, 'cpu')
+    env_g.reset(bank=bank18)
+    env_o = BatchedSnakeEnv(sc18_o, 2, 'cpu')
+    env_o.reset(bank=bank18)
+    o_g0, o_o0 = env_g.obs(), env_o.obs()
+    fresh_vis = bool((o_g0[:, 8:16] != 0).any()) and bool((o_o0[:, 8:16] != 0).any())
+    eq0 = torch.equal(o_g0, o_o0)                      # age 0 < G → 门全开 → 逐位同
+    for _ in range(2):                                 # age ≤ 2 < 3 → 仍可见（吃食重置也安全）
+        a18 = torch.zeros(2, dtype=torch.long)
+        env_g.step(a18)
+        env_o.step(a18)
+    eq2 = torch.equal(env_g.obs(), env_o.obs())
+    env_g.steps_wo_food = torch.full((2,), 3, dtype=torch.long)
+    env_o.steps_wo_food = torch.full((2,), 3, dtype=torch.long)
+    o_g3, o_o3 = env_g.obs(), env_o.obs()
+    hidden_ok = bool((o_g3[:, 8:16] == 0).all().item())
+    rest_ok = (torch.equal(o_g3[:, :8], o_o3[:, :8])
+               and torch.equal(o_g3[:, 16:], o_o3[:, 16:]))
+    sc18.FAST_EVAL = True                              # fast 路径同门控
+    env_gf = BatchedSnakeEnv(sc18, 2, 'cpu')
+    env_gf.reset(bank=bank18)
+    env_gf.steps_wo_food = torch.full((2,), 3, dtype=torch.long)
+    hidden_fast = bool((env_gf.obs()[:, 8:16] == 0).all().item())
+    ok18 = fresh_vis and eq0 and eq2 and hidden_ok and rest_ok and hidden_fast
+    print(f"  刷新即见: {fresh_vis} | age<G 逐位≡关: {eq0 and eq2} | "
+          f"age≥G 食物通道全零: {hidden_ok and hidden_fast} | 其余通道不受影响: {rest_ok} "
+          f"{'OK' if ok18 else 'FAIL'}")
 
     verdict = (ok9 and ok10 and ok11 and ok12 and ok13 and ok14 and ok15
-               and ok16 and ok17 and ok18)
-    print(f"=== 扩展自检（9-18）{'全部通过' if verdict else '存在 FAIL'} ===")
+               and ok16 and ok17 and ok18 and ok19)
+    print(f"=== 扩展自检（9-19）{'全部通过' if verdict else '存在 FAIL'} ===")
     print("=== 自检完成 ===")
-
 
 
 # ==========================================
@@ -4521,10 +4516,10 @@ def make_smoke_config():
     cfg.MAX_STEPS = 60
     cfg.FRAME_RATE = 2
     cfg.CHECKPOINT_INTERVAL = 2
-    cfg.CHECKPOINT_PATH = 'snake_std_smoke_checkpoint.pth'
-    cfg.BEST_MODEL_PATH = 'snake_std_smoke_best.pth'
-    cfg.LATEST_GEN_BEST_MODEL_PATH = 'snake_std_smoke_latest_gen_best.pth'
-    cfg.HISTORY_JSON_PATH = 'snake_std_smoke_history.json'
+    cfg.CHECKPOINT_PATH = 'test17b_smoke_checkpoint.pth'
+    cfg.BEST_MODEL_PATH = 'test17b_smoke_best.pth'
+    cfg.LATEST_GEN_BEST_MODEL_PATH = 'test17b_smoke_latest_gen_best.pth'
+    cfg.HISTORY_JSON_PATH = 'test17b_smoke_history.json'
     cfg.SEED_FROM_BEST = False
     cfg.EVAL_BATCH = 16
     cfg.PRINT_HISTORY_EVERY = 1
@@ -4538,8 +4533,7 @@ def main():
     ap.add_argument('--smoke', action='store_true', help='小规模快速自检')
     ap.add_argument('--selfcheck', action='store_true',
                     help='只跑自检（适应度/变异分布/CRN 确定性/稀疏等价性/观测等价性/'
-                         '激素等价性/池约束/鲁棒评估/K帧首帧-尾帧消融/w_ii与自连开关/'
-                         'E泄漏积分器与w_ee），不训练')
+                         '激素等价性/池约束/鲁棒评估/K帧首帧-尾帧消融/w_ii与自连开关），不训练')
     ap.add_argument('--obs', type=str, default=None,
                     choices=['40', '32ego', '32proj', '24'],
                     help='观测环境：40=40tailflood1（默认）| 32ego=32ego1（test12 ego 编码）| '
@@ -4620,15 +4614,21 @@ def main():
     ap.add_argument('--allow-self-conn', dest='allow_self_conn', action='store_true',
                     help='允许 rec_idx 槽位自连接（i→i 自环，test17A 实验A；'
                          '正/负反馈由 rec_w 符号自由）')
-    ap.add_argument('--train-wii', dest='train_wii', action='store_true',
-                    help='分配并进化 I 自反馈增益 w_ii（对角 W_ii，G2 第4基因，'
-                         '零初始化；test17A 实验A）')
     ap.add_argument('--train-wee', dest='train_wee', action='store_true',
                     help="test17B'：分配并进化 E 对称自项 w_ee（进 σ 内，与 w_ii·I "
                          "对称；零初始化）")
     ap.add_argument('--euler-leak', dest='euler_leak', action='store_true',
-                    help="test17B'：E 泄漏积分器（E=σ(输入−Wei·I+Wrec·E+w_ee·E)+τ·E_old；"
-                         "τ 上限 1.0，st 为 σ 迹负反馈）")
+                    help='test17B：E 泄漏积分器（E=σ(输入−Wei·I+Wrec·E)+τ·E_old；'
+                         'τ 上限暂定 1.0，st 调制关闭）')
+    ap.add_argument('--obs-glimpse', dest='obs_glimpse', type=int, default=None,
+                    help='实验C：食物瞥见窗口 G（食物方位通道仅食物刷新后前 G 步'
+                         '可见；0=关，默认）')
+    ap.add_argument('--base-tau', dest='base_tau', type=float, default=None,
+                    help='τ 初始基准 BASE_TAU_E（默认 0.7；实验C 高τ初始化臂用，'
+                         '如 0.97——越过中性平台直接进入记忆可用区）')
+    ap.add_argument('--train-wii', dest='train_wii', action='store_true',
+                    help='分配并进化 I 自反馈增益 w_ii（对角 W_ii，G2 第4基因，'
+                         '零初始化；test17A 实验A）')
     ap.add_argument('--eval-batch', type=int, default=None)
     ap.add_argument('--seed-model', type=str, default=None,
                     help='指定种子模型路径（单个体注入随机种群，覆盖全种群续训）')
@@ -4686,9 +4686,6 @@ def main():
     ap.add_argument('--seed', type=int, default=None,
                     help='固定 CPU+CUDA 随机种子（A/B 对照实验用；默认不设）')
     ap.add_argument('--play', action='store_true')
-    ap.add_argument('--play-model', dest='play_model', type=str, default=None,
-                    help='--play 时指定模型路径（根目录示例权重：cheat7b_win_model.pth / '
-                         'test7b_base_model.pth，7b 稠密基因组自动转换）')
     args = ap.parse_args()
 
     if args.smoke:
@@ -4730,10 +4727,10 @@ def main():
         cfg.FITNESS_VERSION = 9 if args.fit_mode == 'simple' else 8
         if not args.smoke:
             arm = {'econ': 'econ', 'simple': 'simp', 'tuple': 'tup'}[args.fit_mode]
-            cfg.CHECKPOINT_PATH = f'snake_std_{arm}_checkpoint.pth'
-            cfg.BEST_MODEL_PATH = f'snake_std_{arm}_best_model.pth'
-            cfg.LATEST_GEN_BEST_MODEL_PATH = f'snake_std_{arm}_latest_gen_best.pth'
-            cfg.HISTORY_JSON_PATH = f'snake_std_{arm}_history.json'
+            cfg.CHECKPOINT_PATH = f'test17b_{arm}_checkpoint.pth'
+            cfg.BEST_MODEL_PATH = f'test17b_{arm}_best_model.pth'
+            cfg.LATEST_GEN_BEST_MODEL_PATH = f'test17b_{arm}_latest_gen_best.pth'
+            cfg.HISTORY_JSON_PATH = f'test17b_{arm}_history.json'
     if args.eff_weight is not None:
         cfg.W_EFF = args.eff_weight
     if args.simple_eff_w is not None:
@@ -4759,10 +4756,10 @@ def main():
     if args.no_one_sided_death:
         cfg.ONE_SIDED_TURN_DEATH = False
     if args.name:
-        cfg.CHECKPOINT_PATH = f'snake_std_{args.name}_checkpoint.pth'
-        cfg.BEST_MODEL_PATH = f'snake_std_{args.name}_best_model.pth'
-        cfg.LATEST_GEN_BEST_MODEL_PATH = f'snake_std_{args.name}_latest_gen_best.pth'
-        cfg.HISTORY_JSON_PATH = f'snake_std_{args.name}_history.json'
+        cfg.CHECKPOINT_PATH = f'test17b_{args.name}_checkpoint.pth'
+        cfg.BEST_MODEL_PATH = f'test17b_{args.name}_best_model.pth'
+        cfg.LATEST_GEN_BEST_MODEL_PATH = f'test17b_{args.name}_latest_gen_best.pth'
+        cfg.HISTORY_JSON_PATH = f'test17b_{args.name}_history.json'
     if args.resume_pop:
         payload = torch.load(args.resume_pop, map_location='cpu', weights_only=False)
         saved = payload.get('config', {})
@@ -4813,13 +4810,17 @@ def main():
         cfg.KFRAME_READ = args.kframe_read
     if args.allow_self_conn:
         cfg.ALLOW_SELF_CONN = True
+    if args.euler_leak:
+        cfg.EULER_LEAK = True
+        cfg.TAU_E_MAX = min(float(cfg.TAU_E_MAX), 1.0)   # test17B：τ 上限暂定 1
+    if args.obs_glimpse is not None:
+        cfg.OBS_GLIMPSE = max(0, int(args.obs_glimpse))
+    if args.base_tau is not None:
+        cfg.BASE_TAU_E = float(args.base_tau)
     if args.train_wii:
         cfg.TRAIN_WII = True
     if args.train_wee:
         cfg.TRAIN_WEE = True
-    if args.euler_leak:
-        cfg.EULER_LEAK = True
-        cfg.TAU_E_MAX = min(float(cfg.TAU_E_MAX), 1.0)   # test17B'：τ 上限 1
     if args.eval_batch is not None:
         cfg.EVAL_BATCH = args.eval_batch
     if args.seed_model:
@@ -4917,9 +4918,13 @@ def main():
     # test17A：w_ii / 自连改变动力学与进化语义 → best 追踪独立（v24，最高优先）
     if (getattr(cfg, 'TRAIN_WII', False) or getattr(cfg, 'ALLOW_SELF_CONN', False)):
         cfg.FITNESS_VERSION = 24
-    # test17B'：E 泄漏积分器（修订：st σ迹负反馈 + w_ee 对称项）→ v27（最高优先）
+    # test17B'：E 泄漏积分器（修订：st σ迹负反馈回归 + w_ee 对称项）→ v27（最高
+    # 优先；v25 为修订前 B 口径，已退役）
     if getattr(cfg, 'EULER_LEAK', False):
         cfg.FITNESS_VERSION = 27
+    # 实验C：食物瞥见改变观测语义 → best 追踪独立（v26，最高优先）
+    if int(getattr(cfg, 'OBS_GLIMPSE', 0)) > 0:
+        cfg.FITNESS_VERSION = 26
     if getattr(cfg, 'TRAIN_HORMONE_NET', False):
         groups_in_pattern = {g for tup in cfg.CYCLE_PATTERN for g in tup}
         if 'G3' not in groups_in_pattern:
@@ -4930,8 +4935,6 @@ def main():
     if args.selfcheck:
         selfcheck(cfg)
         return
-    if args.play_model:
-        cfg.BEST_MODEL_PATH = args.play_model
     if args.play:
         play_best(cfg)
         return

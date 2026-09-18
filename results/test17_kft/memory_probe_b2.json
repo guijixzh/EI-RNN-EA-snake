@@ -1,0 +1,104 @@
+{
+  "test17b_qb2_ft_best_model": {
+    "native_mode": "first+tail",
+    "within_step": {
+      "V_per_frame": [
+        0.002950382884591818,
+        0.0009686031844466925,
+        0.0003480602754279971,
+        0.00013171952741686255,
+        5.06768083141651e-05
+      ],
+      "retention_var": 0.017176349747289217,
+      "pairwiseL2_frame0": 0.11314753443002701,
+      "pairwiseL2_tail": 0.01444484107196331,
+      "argmax_frame0_tail_agree": 0.7333333492279053
+    },
+    "history": {
+      "seq_len": 64,
+      "n_seq": 64,
+      "n_state": 15,
+      "action_match_end_begin": 0.0,
+      "d_end_begin": 0.09750837087631226,
+      "ref_change_input": 0.09257903651079438,
+      "ratio_d_over_ref": 1.0532446064605903,
+      "path_specificity_pairwiseL2_end": 0.0013866014778614044,
+      "pairwiseL2_mid": 0.011285415850579739,
+      "E_drift_rel": 0.12805038690567017,
+      "hold_offset_decay": [
+        0.09777741134166718,
+        0.09753952920436859,
+        0.09745649248361588,
+        0.0974530503153801
+      ]
+    }
+  },
+  "test17b_qb2_base_best_model": {
+    "native_mode": "decay+sum",
+    "within_step": {
+      "V_per_frame": [
+        0.09213536232709885,
+        0.020172111690044403,
+        0.010646119713783264,
+        0.007996728643774986,
+        0.006575465202331543
+      ],
+      "retention_var": 0.07136744281731193,
+      "pairwiseL2_frame0": 0.5932216644287109,
+      "pairwiseL2_tail": 0.1719011515378952,
+      "argmax_frame0_tail_agree": 0.3333333432674408
+    },
+    "history": {
+      "seq_len": 64,
+      "n_seq": 64,
+      "n_state": 15,
+      "action_match_end_begin": 0.0,
+      "d_end_begin": 6.636478424072266,
+      "ref_change_input": 8.70275200191378,
+      "ratio_d_over_ref": 0.7625723934926412,
+      "path_specificity_pairwiseL2_end": 0.8786420822143555,
+      "pairwiseL2_mid": 2.9704627990722656,
+      "E_drift_rel": 0.5238771438598633,
+      "hold_offset_decay": [
+        6.088284969329834,
+        6.016984939575195,
+        6.001192569732666,
+        6.0000152587890625
+      ]
+    }
+  },
+  "random": {
+    "native_mode": "first+tail",
+    "within_step": {
+      "V_per_frame": [
+        0.0014336503809317946,
+        0.0003324244753457606,
+        8.358048944501206e-05,
+        2.2541629732586443e-05,
+        6.568874141521519e-06
+      ],
+      "retention_var": 0.004581921944771576,
+      "pairwiseL2_frame0": 0.07461300492286682,
+      "pairwiseL2_tail": 0.005252105183899403,
+      "argmax_frame0_tail_agree": 1.0
+    },
+    "history": {
+      "seq_len": 64,
+      "n_seq": 64,
+      "n_state": 15,
+      "action_match_end_begin": 0.0,
+      "d_end_begin": 0.03112104907631874,
+      "ref_change_input": 0.03548985311429795,
+      "ratio_d_over_ref": 0.8768999120985618,
+      "path_specificity_pairwiseL2_end": 0.0006860785651952028,
+      "pairwiseL2_mid": 0.003741601714864373,
+      "E_drift_rel": 0.04599953070282936,
+      "hold_offset_decay": [
+        0.030391868203878403,
+        0.0302573349326849,
+        0.030250750482082367,
+        0.030246051028370857
+      ]
+    }
+  }
+}

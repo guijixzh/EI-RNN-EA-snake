@@ -1,4 +1,33 @@
 # ==========================================
+# test18a_formula.py —— test18 公式反哺实验 fork（血统 = snake_std 逐字复制）
+#
+# 【test18 研究问题】三篇蒸馏论文的方向是单向的（7b 网络→五算符→V5 三算符
+#   纯公式，闭环 96.32/95.94）。本 fork 回答反向问题：能否用"与 V5 公式的
+#   一致程度"作为纯选择压力（无梯度，进化框架内）把公式能力灌回 256 列
+#   E/I 网络，使闭环分数超越源网络（7b 千局 63.2）。
+#
+# 【改动（--fit-mode formula 开启；关闭时与 snake_std 逐位一致，保真自证=冒烟对拍）】
+#   1. FormulaTeacherV5：V5 三算符显式控制器的批量张量移植（L/R/G + D_F/D_T
+#      + 式(10)(11) + 平局 直行>左>右；洪泛用 max_pool 交叉扩散，与
+#      SiNNtry_V5_final_formula_run.py 的 bitset 版逐位对拍=门1）。
+#   2. 公式状态库（--formula-bank）：教师闭环 rollout 采集的原始盘面状态，
+#      按蛇长分层（3-10/11-30/31-60/61-90/91-98）；评估时用现行编码器现算
+#      观测（防编码漂移）。库固定 → bank 一致率免疫"早死刷一致率"博弈、
+#      覆盖稀有长蛇拓扑态。工具：exp18_bank_build.py。
+#   3. on-policy 一致度遥测：评估循环中网络动作 vs 公式教师动作（fast 路径
+#      与 mismatch 同周期采样，TELEMETRY_EVERY=8）——在网络自身访问的分布上
+#      测一致（DAgger 式，防续篇第6节"一步模仿率≠得分"的分布漂移陷阱）。
+#      metrics 扩列 19→22：[19]=on-policy 一致率，[20]=一致步数，[21]=bank
+#      一致率（formula 模式在 evaluate_population_* 内填充）。
+#   4. --fit-mode formula：字典序硬键 (bank一致率, on-policy一致步数, food)
+#      ——呼应续篇"拓扑守卫必须硬约束"的消融结论；--formula-w-bank/steps/food
+#      任一给定则切换为加权和软模式（对照）。
+#   5. --formula-anneal-gen N：第 N 代起选择键切换为 (simple适应度, bank一致率)
+#      ——从"像公式"出发去超越公式（修 V5 的饿死尾部）；切换代重置 best 追踪。
+#   FITNESS_VERSION=28（formula 口径，best 追踪独立）；断点守卫按 FIT_MODE。
+#   注意：V5 公式与 cheat7b 口径的饿死斜率是 3（本文件 Config 默认 5）——
+#   formula 实验臂须显式 --starve-slope 3 对齐。
+#
 # snake_std.py —— 贪吃蛇进化标准实现程序（以 test16b 为基座）
 #
 # 定位：把 16 系列全部已验证机制收敛为单一可配置入口，四种能力面全部
@@ -293,11 +322,11 @@ class Config:
     # --- 输出 ---
     PRINT_HISTORY_EVERY = 1
 
-    # --- 断点 / 最优模型 / 种子 ---
-    CHECKPOINT_PATH = 'snake_std_checkpoint.pth'
-    BEST_MODEL_PATH = 'snake_std_best_model.pth'
-    LATEST_GEN_BEST_MODEL_PATH = 'snake_std_latest_gen_best.pth'
-    HISTORY_JSON_PATH = 'snake_std_history.json'
+    # --- 断点 / 最优模型 / 种子（fork：输出前缀 test18a_*）---
+    CHECKPOINT_PATH = 'test18a_checkpoint.pth'
+    BEST_MODEL_PATH = 'test18a_best_model.pth'
+    LATEST_GEN_BEST_MODEL_PATH = 'test18a_latest_gen_best.pth'
+    HISTORY_JSON_PATH = 'test18a_history.json'
     AUTO_RESUME = True
     CHECKPOINT_INTERVAL = 10
     SEED_FROM_BEST = False
@@ -318,6 +347,17 @@ class Config:
     TE_ELITE = 0                # te-配额精英（0=关）
     IMITATION_W = 0.0           # 模仿引导（教师全局输入，行为不可比；0=关）
     HABIT_W = 0.0               # v6 加法习惯项（已由 v7 乘法式取代）
+
+    # --- test18 公式反哺（--fit-mode formula；默认全关=snake_std 逐位口径）---
+    FORMULA_TEACHER = False     # 评估循环注入 FormulaTeacherV5 on-policy 一致度遥测
+    FORMULA_BANK_PATH = None    # 公式状态库 .pt（exp18_bank_build.py 生成；formula 模式必填）
+    FORMULA_ANNEAL_GEN = None   # 第 N 代起选择键切 (simple, bank一致率)（None=不退火）
+    FORMULA_W_BANK = None       # 以下三者任一非 None → 加权和软模式（默认字典序硬键）
+    FORMULA_W_STEPS = None
+    FORMULA_W_FOOD = None
+    FORMULA_STEPS_CAP = 200.0   # 软模式 on-policy 一致步数归一上限（≈V5 平均步数/局）
+    FORMULA_EVERY = 16          # fast 路径公式教师采样周期（步；bank 主键零噪声，
+                                # on-policy 为次键，降频采样省洪泛算力）
 
 
 # ==========================================
@@ -430,10 +470,56 @@ def _fitness_simple(m, cfg):
     return food + float(getattr(cfg, 'SIMPLE_EFF_W', 0.3)) * food / max(steps_last, 1.0)
 
 
+def _fitness_formula(m, cfg):
+    """test18 公式反哺适应度：字典序硬键 (bank一致率, on-policy一致步数, food)。
+    设计依据（三篇蒸馏论文 + test17 的实证）：
+    - 续篇消融证明拓扑守卫必须硬约束（软惩罚 λ=1000 仍失败）→ 一致度作主键
+      而非软加权；
+    - bank 为固定库逐体确定量 → 零评估噪声、免疫"早死刷一致率"；
+    - on-policy 一致步数（次键）在网络自身访问分布上度量（DAgger 式），同时
+      奖励存活长度——防"短命但库上蒙对"；
+    - food 末键：一致度平台后自然过渡到分数竞争（或显式 --formula-anneal-gen）。
+    判死守卫同 simple/econ。--formula-w-* 任一给定则由 _fitness_formula_w 取代。"""
+    if m[1] >= 99999:
+        return (-1e9, -1.0, -1.0, -1e9)
+    if getattr(cfg, 'ONE_SIDED_TURN_DEATH', False) and len(m) > 9:
+        a1, a2 = float(m[8]), float(m[9])
+        if (a1 > 1.0 and a2 == 0.0) or (a2 > 1.0 and a1 == 0.0):
+            return (-1e9, -1.0, -1.0, -1e9)
+    bank = float(m[21]) if len(m) > 21 else 0.0
+    astep = float(m[20]) if len(m) > 20 else 0.0
+    return (bank, astep, float(m[0]))
+
+
+def _fitness_formula_w(m, cfg):
+    """加权和软模式（--formula-w-bank/steps/food 任一给定；对照用，默认关）：
+    w_b·bank + w_s·min(一致步数, cap)/cap + w_f·food。"""
+    if m[1] >= 99999:
+        return -1e9
+    if getattr(cfg, 'ONE_SIDED_TURN_DEATH', False) and len(m) > 9:
+        a1, a2 = float(m[8]), float(m[9])
+        if (a1 > 1.0 and a2 == 0.0) or (a2 > 1.0 and a1 == 0.0):
+            return -1e9
+    bank = float(m[21]) if len(m) > 21 else 0.0
+    astep = float(m[20]) if len(m) > 20 else 0.0
+    cap = max(1.0, float(getattr(cfg, 'FORMULA_STEPS_CAP', 200.0)))
+    wb = float(getattr(cfg, 'FORMULA_W_BANK', 0.0) or 0.0)
+    ws = float(getattr(cfg, 'FORMULA_W_STEPS', 0.0) or 0.0)
+    wf = float(getattr(cfg, 'FORMULA_W_FOOD', 0.0) or 0.0)
+    return wb * bank + ws * min(astep, cap) / cap + wf * float(m[0])
+
+
 def _base_fitness(m, cfg):
     """按 FIT_MODE 分派的 base 适应度（报告与 LCB 的底座）。"""
-    if getattr(cfg, 'FIT_MODE', 'econ') == 'simple':
+    mode = getattr(cfg, 'FIT_MODE', 'econ')
+    if mode == 'simple':
         return _fitness_simple(m, cfg)
+    if mode == 'formula':
+        # 软模式给标量；字典序给元组（报告处取 [0]=bank）
+        w = (getattr(cfg, 'FORMULA_W_BANK', None) is not None
+             or getattr(cfg, 'FORMULA_W_STEPS', None) is not None
+             or getattr(cfg, 'FORMULA_W_FOOD', None) is not None)
+        return _fitness_formula_w(m, cfg) if w else _fitness_formula(m, cfg)
     return _fitness_econ(m, cfg)
 
 
@@ -457,6 +543,20 @@ def _make_key_fn(cfg, K=None):
     mode = getattr(cfg, 'FIT_MODE', 'econ')
     if mode == 'tuple':
         return lambda m: _fitness_tuple(m, cfg)
+    if mode == 'formula':
+        # 退火后（--formula-anneal-gen）：(simple 适应度, bank 一致率)——分数为主、
+        # 公式一致度为平局裁决；退火前：字典序（或 --formula-w-* 加权和）
+        if bool(getattr(cfg, '_FD_ANNEALED', False)):
+            def _key(m):
+                base = _fitness_simple(m, cfg)
+                bank = float(m[21]) if len(m) > 21 else 0.0
+                return (base, bank)
+            return _key
+        w = (getattr(cfg, 'FORMULA_W_BANK', None) is not None
+             or getattr(cfg, 'FORMULA_W_STEPS', None) is not None
+             or getattr(cfg, 'FORMULA_W_FOOD', None) is not None)
+        return (lambda m: _fitness_formula_w(m, cfg) if w
+                else _fitness_formula(m, cfg))
     if K:
         return lambda m: _sel_key(m, cfg, K)
     return lambda m: _base_fitness(m, cfg)
@@ -626,6 +726,360 @@ class VectorCycleTeacher:
                     best_sz = torch.where(take, sz, best_sz)
             act = torch.where(bad, fb_act, act)
         return act
+
+
+# ---------- test18：V5 三算符显式公式教师（批量张量移植）----------
+_FORMULA_DIR_T = None      # DIRS 表惰性缓存（按 device）
+
+
+def _formula_dirs(device):
+    global _FORMULA_DIR_T
+    if _FORMULA_DIR_T is None or _FORMULA_DIR_T.device != device:
+        _FORMULA_DIR_T = torch.tensor([[0, 1], [1, 0], [0, -1], [-1, 0]],
+                                      dtype=torch.long, device=device)
+    return _FORMULA_DIR_T
+
+
+class FormulaTeacherV5:
+    """V5 最终三算符显式控制器的批量张量版（test18 移植，接口同
+    VectorCycleTeacher.act → [B]，0直1左2右）。逐式对应论文《V5 逐式代入演算》：
+      式(1) 候选方向（直行 d / 左 (d+3)%4 / 右 (d+1)%4）与未来头
+      式(3) 即时碰撞禁入（吃食含尾；不吃尾格释放；头位恒不算）
+      式(5) 未来尾（吃食 body[len-1]；不吃 body[len-2]）
+      式(6) 洪泛阻塞集（吃食 body[0..len-2]；不吃 body[0..len-3]）
+      式(7) max_pool 交叉洪泛（与 V5 脚本 bitset 版逐位等价，门1对拍）
+      式(8) R=未来头尾同连通域；G=食物同连通域
+      式(9) D_F/D_T 曼哈顿距离
+      式(10) A_safe={L∧R}，空则回退全部即时合法
+      式(11) 有 G → argmin D_F；否则 argmax D_T；平局 直行>左>右（严格先到先得）
+    """
+
+    def __init__(self, grid_size, device):
+        self.G = int(grid_size)
+        self.device = device
+
+    @torch.no_grad()
+    def act(self, head, food, body, body_len, dir_idx, necks=None):
+        B = head.shape[0]
+        G, dev = self.G, self.device
+        ar = torch.arange(B, device=dev)
+        dirs = _formula_dirs(dev)
+        d = dir_idx.long()
+        # 式(1)：三候选方向 [B,3]（0直 1左 2右）
+        cd = torch.stack((d, (d + 3) % 4, (d + 1) % 4), dim=1)
+        nh = head.unsqueeze(1) + dirs[cd]                       # [B,3,2]
+        inb = ((nh >= 0) & (nh < G)).all(dim=2)                 # [B,3]
+
+        # 蛇身占用三口径（seg 下标 < 上限）：全身体 / 去尾 / 去尾+去前尾。
+        # 无效段（len 之后的 stale 单元）flat 一律导向专属桶列 G*G——若直接
+        # scatter 会与真实占用格重复索引（stale 零全指向格 0），CUDA 写入
+        # 顺序未定义 → 占用位随机丢失（门1 的偶发 mismatch 与门2 全员自撞根因）
+        seg = torch.arange(body.shape[1], device=dev)[None, :]
+        flat = (body[:, :, 0] * G + body[:, :, 1]).clamp(max=G * G - 1)
+
+        def _occ(valid):
+            occ = torch.zeros(B, G * G + 1, dtype=torch.float32, device=dev)
+            safe = torch.where(valid, flat, torch.full_like(flat, G * G))
+            occ.scatter_add_(1, safe, valid.float())
+            return occ[:, :G * G] > 0.5
+
+        head_flat = head[:, 0] * G + head[:, 1]
+        occ_full = _occ(seg < body_len[:, None])
+        occ_full = occ_full.clone()
+        occ_full[ar, head_flat] = False                 # 碰撞检查用（V5 ~head_bit）
+
+        eat = (nh == food.unsqueeze(1)).all(dim=2)              # [B,3] 式(2)，逐候选
+        ar3 = ar.unsqueeze(1).expand(B, 3)
+        # 式(3)：碰撞占用 = 吃 ? 全身体 : 去尾（均不含头位——V5 collision 侧 ~head_bit）
+        occ_notail_u = _occ(seg < (body_len - 1).clamp(min=0)[:, None])
+        occ_notail = occ_notail_u.clone()
+        occ_notail[ar, head_flat] = False
+        occ_use = torch.where(eat.unsqueeze(-1), occ_full.unsqueeze(1),
+                              occ_notail.unsqueeze(1))          # [B,3,G*G]
+        nh_flat = (nh[:, :, 0].clamp(0, G - 1) * G + nh[:, :, 1].clamp(0, G - 1))
+        hit = torch.gather(occ_use, 2, nh_flat.unsqueeze(-1)).squeeze(-1)
+        legal = inb & (~hit)                                    # L(a) [B,3]
+
+        # 式(5)：未来尾（吃 body[len-1]；不吃 body[max(len-2,0)]）——逐候选
+        ft_seg = torch.where(eat, (body_len - 1).clamp(min=0)[:, None].expand(B, 3),
+                             (body_len - 2).clamp(min=0)[:, None].expand(B, 3))
+        ft = body[ar3, ft_seg]                                  # [B,3,2]
+
+        # 式(6)：洪泛阻塞集 = 吃 ? 去尾 : 去尾+去前尾（逐候选）。
+        # 注意：阻塞集按 V5 pref 原样**含头位**（头是未来身体的一部分，洪泛不得
+        # 穿过）——与碰撞检查的 ~head_bit 是两套口径，勿混用
+        occ_blk2 = _occ(seg < (body_len - 2).clamp(min=0)[:, None])
+        blocked = torch.where(eat.unsqueeze(-1), occ_notail_u.unsqueeze(1),
+                              occ_blk2.unsqueeze(1))            # [B,3,G*G]
+
+        free = (~blocked.view(B, 3, G, G)).float()              # [B,3,G,G]
+        reach = torch.zeros(B, 3, G, G, device=dev)
+        reach[ar3, torch.arange(3, device=dev).unsqueeze(0).expand(B, 3),
+              nh[:, :, 0].clamp(0, G - 1), nh[:, :, 1].clamp(0, G - 1)] = 1.0
+        reach = reach * free                                    # 起点自身必须自由
+        mp = torch.nn.functional.max_pool2d
+        flat3 = reach.view(B * 3, 1, G, G)
+        free3 = free.reshape(B * 3, 1, G, G)
+        prev = None
+        for it in range(G * G):                                 # 式(7) 洪泛
+            cross = torch.maximum(mp(flat3, (3, 1), stride=1, padding=(1, 0)),
+                                  mp(flat3, (1, 3), stride=1, padding=(0, 1)))
+            flat3 = cross * free3
+            if it % 8 == 7:
+                if prev is not None and torch.equal(prev, flat3):
+                    break
+                prev = flat3.clone()
+        reach = flat3.view(B, 3, G, G) > 0.5
+
+        cand3 = torch.arange(3, device=dev).unsqueeze(0).expand(B, 3)
+        ft_cell = reach[ar3, cand3, ft[:, :, 0], ft[:, :, 1]]
+        fd_cell = reach[ar3, cand3,
+                        food[:, 0].unsqueeze(1).expand(B, 3),
+                        food[:, 1].unsqueeze(1).expand(B, 3)]
+        # 式(8)：只对合法候选有意义（非法候选的洪泛结果无定义，用 legal 门控）
+        R = ft_cell & legal
+        Gf = fd_cell & legal
+
+        # 式(9)：曼哈顿距离
+        DF = (nh[:, :, 0] - food[:, 0].unsqueeze(1)).abs() + \
+             (nh[:, :, 1] - food[:, 1].unsqueeze(1)).abs()      # [B,3]
+        DT = (nh[:, :, 0] - ft[:, :, 0]).abs() + \
+             (nh[:, :, 1] - ft[:, :, 1]).abs()
+
+        # 式(10)：safe = legal ∧ R；行内空则回退 legal
+        safe = R
+        no_safe = ~safe.any(dim=1)
+        safe = torch.where(no_safe.unsqueeze(1), legal, safe)
+
+        # 式(11)：safe 内有 G → argmin DF（子集=safe∧G）；否则 argmax DT（子集=safe）
+        food_pool = safe & Gf
+        has_food = food_pool.any(dim=1)
+        # 得分：追食分支越小越好（DF），追尾分支越大越好（-DT）；非子集 +inf
+        BIG = 1e9
+        score = torch.where(food_pool, DF.float(),
+                            torch.where(safe, -DT.float(),
+                                        torch.full_like(DF.float(), BIG)))
+        use_food = has_food
+        # 无 food_pool 的行改用 -DT（safe 子集已在 torch.where 中正确给出 -DT；
+        # food_pool 行的非 safe 候选为 BIG）——补：无 food 行直接用 -DT 已满足，
+        # 有 food 行的非 food_pool safe 候选需为 BIG：
+        score = torch.where(use_food.unsqueeze(1) & safe & (~food_pool),
+                            torch.full_like(score, BIG), score)
+        # 平局 直行>左>右：按 j=0,1,2 顺序严格比较，先到先得（与 V5 sort 一致）
+        act = torch.zeros(B, dtype=torch.long, device=dev)
+        best = torch.full((B,), BIG, device=dev)
+        for j in range(3):
+            sc = score[:, j]
+            take = sc < best
+            act = torch.where(take, torch.full_like(act, j), act)
+            best = torch.where(take, sc, best)
+        # 全候选 BIG（无任何合法动作，式(10) 兜底后仍空）→ 保持 0（直行，V5 同）
+        return act
+
+
+def formula_v5_scalar(body, body_len, dir_idx, food, grid_size=10):
+    """V5 控制器单状态标量参考实现（Python 大整数 bitset 洪泛，逐字对应
+    SiNNtry_V5_final_formula_run.py 的 choose_actions 单行分支；供自检 19
+    与 exp18_teacher_gate.py 的门1 对拍基准）。body 为 [len,2] 列表/张量。"""
+    G = grid_size
+    body = [[int(r), int(c)] for r, c in body[:int(body_len)]]
+    head = body[0]
+    food = [int(food[0]), int(food[1])]
+    d = int(dir_idx)
+    dirs = [[0, 1], [1, 0], [0, -1], [-1, 0]]
+
+    not_right = not_left = 0
+    for r in range(G):
+        for c in range(G):
+            bit = 1 << (r * G + c)
+            if c < G - 1:
+                not_right |= bit
+            if c > 0:
+                not_left |= bit
+
+    def flood(start, blocked):
+        free = ((1 << (G * G)) - 1) & ~blocked
+        reach = 1 << start
+        for _ in range(G * G):
+            nb = ((reach << G) | (reach >> G)
+                  | ((reach & not_right) << 1) | ((reach & not_left) >> 1)) & free
+            nr = reach | nb
+            if nr == reach:
+                break
+            reach = nr
+        return reach
+
+    length = len(body)
+    pref = [0] * (length + 1)
+    mask = 0
+    for j, (r, c) in enumerate(body):
+        mask |= 1 << (r * G + c)
+        pref[j + 1] = mask
+    food_idx = food[0] * G + food[1]
+    head_bit = 1 << (head[0] * G + head[1])
+
+    candidates = []
+    for act_i, turn in enumerate((0, -1, 1)):
+        nd = (d + turn) % 4
+        nh = [head[0] + dirs[nd][0], head[1] + dirs[nd][1]]
+        if nh[0] < 0 or nh[0] >= G or nh[1] < 0 or nh[1] >= G:
+            continue
+        ni = nh[0] * G + nh[1]
+        eat = (nh == food)
+        collision = (pref[length] if eat else pref[length - 1]) & ~head_bit
+        if (collision >> ni) & 1:
+            continue
+        blocked = pref[length - 1] if eat else pref[max(length - 2, 0)]
+        ft = body[length - 1] if eat else body[max(length - 2, 0)]
+        ti = ft[0] * G + ft[1]
+        reach = flood(ni, blocked)
+        candidates.append({
+            'act': act_i,
+            'R': bool((reach >> ti) & 1),
+            'G': bool((reach >> food_idx) & 1),
+            'DF': abs(nh[0] - food[0]) + abs(nh[1] - food[1]),
+            'DT': abs(nh[0] - ft[0]) + abs(nh[1] - ft[1]),
+        })
+    if not candidates:
+        return 0
+    safe = [q for q in candidates if q['R']] or candidates
+    food_pool = [q for q in safe if q['G']]
+    if food_pool:
+        best_value = min(q['DF'] for q in food_pool)
+        best = [q for q in food_pool if q['DF'] == best_value]
+    else:
+        best_value = max(q['DT'] for q in safe)
+        best = [q for q in safe if q['DT'] == best_value]
+    best.sort(key=lambda q: q['act'])
+    return best[0]['act']
+
+
+# ---------- test18：公式状态库（原始盘面 + 教师动作，蛇长分层）----------
+_FORMULA_BANK = None      # 本 run 的库缓存（dict：原始状态 + 行动作 + 惰性 obs）
+_FORMULA_BANK_LAYERS = ((3, 10), (11, 30), (31, 60), (61, 90), (91, 98))
+
+
+def formula_bank_layer_of(body_len):
+    for i, (lo, hi) in enumerate(_FORMULA_BANK_LAYERS):
+        if lo <= body_len <= hi:
+            return i
+    return 0 if body_len < 3 else len(_FORMULA_BANK_LAYERS) - 1
+
+
+def save_formula_bank(path, bank):
+    out = {
+        'obs_enc_version': bank['obs_enc_version'],
+        'grid_size': bank['grid_size'],
+        'body': bank['body'].to(torch.int16).cpu(),
+        'body_len': bank['body_len'].to(torch.int16).cpu(),
+        'head': bank['head'].to(torch.int16).cpu(),
+        'dir_idx': bank['dir_idx'].to(torch.int8).cpu(),
+        'food': bank['food'].to(torch.int16).cpu(),
+        'action': bank['action'].to(torch.int8).cpu(),
+        'layer': bank['layer'].to(torch.int8).cpu(),
+        'layers': bank['layers'],
+    }
+    torch.save(out, path)
+
+
+def load_formula_bank(path, cfg, device):
+    raw = torch.load(path, map_location='cpu', weights_only=False)
+    if raw.get('obs_enc_version') != getattr(cfg, 'OBS_ENC_VERSION', ''):
+        raise ValueError(f"公式库观测编码不符：bank={raw.get('obs_enc_version')} "
+                         f"vs cfg={cfg.OBS_ENC_VERSION}（用 exp18_bank_build.py 按当前 "
+                         f"--obs 重建）")
+    if int(raw.get('grid_size', cfg.GRID_SIZE)) != int(cfg.GRID_SIZE):
+        raise ValueError(f"公式库棋盘不符：bank={raw.get('grid_size')} "
+                         f"vs cfg={cfg.GRID_SIZE}")
+    bank = {
+        'obs_enc_version': raw['obs_enc_version'],
+        'grid_size': int(raw['grid_size']),
+        'body': raw['body'].long().to(device),
+        'body_len': raw['body_len'].long().to(device),
+        'head': raw['head'].long().to(device),
+        'dir_idx': raw['dir_idx'].long().to(device),
+        'food': raw['food'].long().to(device),
+        'action': raw['action'].long().to(device),
+        'layer': raw['layer'].long().to(device),
+        'layers': raw['layers'],
+        'obs': None,                    # 惰性：首次评估时用现行编码器现算
+    }
+    return bank
+
+
+def formula_bank_obs(bank, cfg, device):
+    """把库内原始盘面灌入 BatchedSnakeEnv 后用现行编码器现算观测（防编码漂移；
+    32proj 编码只读 head/body/body_len/dir_idx/food）。"""
+    if bank.get('obs') is not None:
+        return bank['obs']
+    M = bank['body_len'].shape[0]
+    env = BatchedSnakeEnv(cfg, M, device)
+    env.reset()
+    env.head = bank['head']
+    env.body = bank['body']
+    env.body_len = bank['body_len'].clamp(min=2)
+    env.dir_idx = bank['dir_idx']
+    env.food = bank['food']
+    with torch.no_grad():
+        obs = env.obs()                                        # [M,O] float32
+    bank['obs'] = obs
+    return obs
+
+
+class _ExpandedOnePop:
+    """单个体权重按 M 行 stride-0 扩展的只读视图（forward_batch 只读 pop 张量，
+    免拷贝；bmm/gather 均支持 stride-0 批维）。"""
+
+    def __init__(self, one, M):
+        for name in ('W_in_eff', 'W_out_eff', 'b_out', 'rec_idx', 'rec_w',
+                     'tau_e', 'w_ei', 'w_ie'):
+            t = getattr(one, name)
+            setattr(self, name, t.expand(M, *t.shape[1:]))
+        for opt in ('w_ii', 'w_ee', '_mnorm_slot'):
+            t = getattr(one, opt, None)
+            if t is not None:
+                setattr(self, opt, t.expand(M, *t.shape[1:]) if t.dim() > 1
+                        else t.expand(M))
+        for opt in ('Wh1', 'b_h1', 'W_excit', 'b_excit', 'W_inhib', 'b_inhib'):
+            t = getattr(one, opt, None)
+            if t is not None:
+                setattr(self, opt, t.expand(M, *t.shape[1:]) if t.dim() > 1
+                        else t.expand(M))
+        self.dtype = one.dtype
+
+
+def formula_bank_agreement(pop, cfg, device=None, chunk=4096):
+    """逐个体在公式状态库上的动作一致率 [P]（零状态单步决策：E/I/st 清零、
+    press=0，K 帧完整跑 deliberate_batch——与 episode 起点口径一致；论文
+    Stage2 已证 7b 行为近乎无历史依赖）。库固定 → 零评估噪声、零 CRN 方差。"""
+    global _FORMULA_BANK
+    if _FORMULA_BANK is None:
+        raise RuntimeError('公式状态库未加载（--fit-mode formula 需 --formula-bank）')
+    dev = device if device is not None else pop.device
+    obs_full = formula_bank_obs(_FORMULA_BANK, cfg, dev)       # [M,O]
+    want = _FORMULA_BANK['action']                              # [M]
+    M = want.shape[0]
+    agree = torch.zeros(pop.P, dtype=torch.float32)
+    half = torch.float16 if bool(getattr(cfg, 'USE_FP16', True)) else torch.float32
+    with torch.no_grad():
+        for i in range(pop.P):
+            one = pop[i:i + 1]
+            if one.W_in_eff is None or one.W_out_eff is None:
+                one.refresh_eff()                  # 全种群 pop 不自带 EFF（评估路径才刷新）
+            view = _ExpandedOnePop(one, M)
+            a_cnt = 0.0
+            for lo in range(0, M, chunk):
+                hi = min(lo + chunk, M)
+                m = hi - lo
+                o = obs_full[lo:hi].to(half)
+                E = torch.zeros(m, pop.N, dtype=half, device=dev)
+                I = torch.zeros(m, pop.N, dtype=half, device=dev)
+                st = torch.zeros(m, pop.N, dtype=half, device=dev)
+                press = torch.zeros(m, dtype=half, device=dev)
+                act, _, _, _, _, _ = deliberate_batch(view, o, E, I, st, press, cfg)
+                a_cnt += float((act == want[lo:hi]).sum().item())
+            agree[i] = a_cnt / M
+    return agree
 
 
 # ==========================================
@@ -2021,6 +2475,11 @@ def _eval_sweep_chunk(pop_rep, cfg, bank, prof=None):
     teacher = VectorCycleTeacher(cfg.GRID_SIZE, dev)   # mismatch 恒追踪（代价可忽略）
     mis_cnt = torch.zeros(B, dtype=torch.float32, device=dev)
     mis_steps = torch.zeros(B, dtype=torch.float32, device=dev)
+    # test18：公式教师 on-policy 一致度遥测（--fit-mode formula；默认不创建=零开销）
+    fteacher = (FormulaTeacherV5(cfg.GRID_SIZE, dev)
+                if bool(getattr(cfg, 'FORMULA_TEACHER', False)) else None)
+    fag_cnt = torch.zeros(B, dtype=torch.float32, device=dev)
+    fag_steps = torch.zeros(B, dtype=torch.float32, device=dev)
 
     for t in range(cfg.MAX_STEPS):
         al = env.alive
@@ -2047,6 +2506,15 @@ def _eval_sweep_chunk(pop_rep, cfg, bank, prof=None):
                                 env.dir_idx, necks)
             mis_cnt += (al & (act != t_act)).float()
             mis_steps += al.float()
+            _pt(prof, 'teacher', t0)
+        if fteacher is not None:
+            t0 = time.perf_counter() if prof is not None else 0.0
+            ar = torch.arange(B, device=dev)
+            necks = env.body[ar, 1]
+            f_act = fteacher.act(env.head, env.food, env.body, env.body_len,
+                                 env.dir_idx, necks)
+            fag_cnt += (al & (act == f_act)).float()
+            fag_steps += al.float()
             _pt(prof, 'teacher', t0)
         tot_act1 += (al & (act == 1)).float()
         tot_act2 += (al & (act == 2)).float()
@@ -2098,13 +2566,18 @@ def _eval_sweep_chunk(pop_rep, cfg, bank, prof=None):
     edge_share = tot_eshare / beh_steps.clamp(min=1.0)
     conn_score = tot_conn / conn_n.clamp(min=1.0)
     straight = 1.0 - (tot_act1 + tot_act2) / beh_steps.clamp(min=1.0)
+    # test18：[19]=公式 on-policy 一致率，[20]=一致步数，[21]=bank 一致率占位
+    #（formula 模式由 evaluate_population_* 填充；非 formula 恒 0，旧读者按列号取值不受影响）
+    fag_rate = fag_cnt / fag_steps.clamp(min=1.0)
     metrics = torch.stack((tot_food, tot_seen, tot_unseen, last, prox,
                            tot_wall + (env.died == 1).float(),
                            tot_self + (env.died == 2).float(),
                            tot_starve + (env.died == 3).float(),
                            tot_act1, tot_act2, turn_last, avg_reach,
                            mismatch, min_reach.clamp(max=1.0), island,
-                           edge_sum, conn_score, straight, edge_share), dim=1)
+                           edge_sum, conn_score, straight, edge_share,
+                           fag_rate, fag_cnt,
+                           torch.zeros_like(fag_rate)), dim=1)
     return metrics
 
 
@@ -2186,6 +2659,11 @@ def _eval_sweep_chunk_fast(pop_rep, cfg, bank, prof=None):
     teacher = VectorCycleTeacher(cfg.GRID_SIZE, dev)   # mismatch 遥测（降频采样）
     mis_cnt = torch.zeros(B, dtype=torch.float32, device=dev)
     mis_steps = torch.zeros(B, dtype=torch.float32, device=dev)
+    # test18：公式教师 on-policy 一致度遥测（与 mismatch 同周期采样，遥测口径一致）
+    fteacher = (FormulaTeacherV5(cfg.GRID_SIZE, dev)
+                if bool(getattr(cfg, 'FORMULA_TEACHER', False)) else None)
+    fag_cnt = torch.zeros(B, dtype=torch.float32, device=dev)
+    fag_steps = torch.zeros(B, dtype=torch.float32, device=dev)
 
     T_EVERY = max(1, int(getattr(cfg, 'TELEMETRY_EVERY', 8)))
     EDGE_EVERY = max(1, int(getattr(cfg, 'EDGE_EVERY', 4)))
@@ -2218,6 +2696,12 @@ def _eval_sweep_chunk_fast(pop_rep, cfg, bank, prof=None):
                                 env.dir_idx, necks)
             mis_cnt += (al & (act != t_act)).float()
             mis_steps += al.float()
+            if fteacher is not None and t % max(1, int(getattr(
+                    cfg, 'FORMULA_EVERY', 16))) == 0:
+                f_act = fteacher.act(env.head, env.food, env.body, env.body_len,
+                                     env.dir_idx, necks)
+                fag_cnt += (al & (act == f_act)).float()
+                fag_steps += al.float()
             _pt(prof, 'teacher', t0)
         tot_act1 += (al & (act == 1)).float()
         tot_act2 += (al & (act == 2)).float()
@@ -2280,13 +2764,17 @@ def _eval_sweep_chunk_fast(pop_rep, cfg, bank, prof=None):
     edge_share = tot_eshare / tot_edge_steps.clamp(min=1.0)
     conn_score = tot_conn / conn_n.clamp(min=1.0)
     straight = 1.0 - (tot_act1 + tot_act2) / beh_steps.clamp(min=1.0)
+    # test18：[19]=公式 on-policy 一致率，[20]=一致步数，[21]=bank 一致率占位（同慢路径）
+    fag_rate = fag_cnt / fag_steps.clamp(min=1.0)
     metrics = torch.stack((tot_food, tot_seen, tot_unseen, last, prox,
                            tot_wall + (env.died == 1).float(),
                            tot_self + (env.died == 2).float(),
                            tot_starve + (env.died == 3).float(),
                            tot_act1, tot_act2, turn_last, avg_reach,
                            mismatch, min_reach.clamp(max=1.0), island,
-                           edge_sum, conn_score, straight, edge_share), dim=1)
+                           edge_sum, conn_score, straight, edge_share,
+                           fag_rate, fag_cnt,
+                           torch.zeros_like(fag_rate)), dim=1)
     return metrics
 
 
@@ -2332,7 +2820,7 @@ def _eval_pop_banks(pop, cfg, banks, prof=None, order_key=None):
         bank = None
     max_B = _auto_eval_batch(cfg, dev)
     per_P = max(1, max_B // E)
-    ncol = 19
+    ncol = 22
     out = torch.zeros(pop.P, ncol)
     chunk_fn = (_eval_sweep_chunk_fast if bool(getattr(cfg, 'FAST_EVAL', False))
                 else _eval_sweep_chunk)
@@ -2374,7 +2862,7 @@ def _eval_pop_robust(pop, cfg, banks, prof=None, order_key=None):
         return _eval_pop_banks(pop, cfg, banks, prof=prof, order_key=order_key)
     dev = pop.device
     P = pop.P
-    ncol = 19
+    ncol = 22
     out = torch.zeros(P, ncol)
     noise_std = float(getattr(cfg, 'ROBUST_NOISE_STD', 1e-3))
     if order_key is not None:
@@ -2441,6 +2929,9 @@ def evaluate_population_gpu(pop, cfg, gen=0, k2=None):
     m1 = _eval_pop_robust(pop, cfg,
                           make_banks(cfg, gen, 1, K1, dev) if use_crn else [None] * K1,
                           prof=prof)
+    # test18：bank 一致率（逐个体确定性，零评估噪声）——须在阶段1排序前填充
+    if bool(getattr(cfg, 'FORMULA_TEACHER', False)):
+        m1[:, 21] = formula_bank_agreement(pop, cfg).to(m1.device)
     mn1 = m1.numpy()
     # sorted(reverse=True) 稳定排序，且兼容 tuple 字典序适应度（np.argsort 不行）
     order1 = sorted(range(P), key=lambda i: key1(mn1[i]), reverse=True)
@@ -2462,6 +2953,10 @@ def evaluate_population_gpu(pop, cfg, gen=0, k2=None):
 
     metrics = m1.clone()
     metrics[surv_idx] = (K1 * m1[surv_idx] + K2 * m2) / (K1 + K2)
+    # test18：bank 列随 m1 保留（m2 行该列为 0，均值口径无意义——bank 是逐个体
+    # 确定性量，两阶段本就同值，直接恢复）
+    if bool(getattr(cfg, 'FORMULA_TEACHER', False)):
+        metrics[surv_idx, 21] = m1[surv_idx, 21]
     mn = metrics.numpy()
     # 幸存者按累计适应度降序在前；落选者按阶段1适应度降序垫后（无精英资格）
     surv_rank = sorted(surv_idx, key=lambda i: key2(mn[i]), reverse=True)
@@ -2496,6 +2991,9 @@ def evaluate_population_halving(pop, cfg, gen=0):
     m1 = _eval_pop_robust(pop, cfg,
                           make_banks(cfg, gen, 1, K1, dev) if use_crn else [None] * K1,
                           prof=prof)
+    # test18：bank 一致率填充（阶段1排序前；逐个体确定性量）
+    if bool(getattr(cfg, 'FORMULA_TEACHER', False)):
+        m1[:, 21] = formula_bank_agreement(pop, cfg).to(m1.device)
     mn1 = m1.numpy()
     order1 = sorted(range(P), key=lambda i: key1(mn1[i]), reverse=True)
     surv_idx = order1[:keep]
@@ -2527,6 +3025,9 @@ def evaluate_population_halving(pop, cfg, gen=0):
     metrics[surv_idx] = (K1 * m1[surv_idx] + A * m2a) / (K1 + A)
     metrics[top_glob] = ((K1 * m1[top_glob] + A * m2a[top_local] + Beps * m2b)
                          / (K1 + A + Beps))
+    # test18：bank 列恢复（同 evaluate_population_gpu 理由）
+    if bool(getattr(cfg, 'FORMULA_TEACHER', False)):
+        metrics[surv_idx, 21] = m1[surv_idx, 21]
     mn = metrics.numpy()
     surv_rank = sorted(top_glob, key=lambda i: key_f(mn[i]), reverse=True)
     rest = [surv_idx[j] for j in range(keep) if j not in top_set]
@@ -3169,6 +3670,21 @@ def run_training(cfg):
               f"flood_depth={cfg.FLOOD_DEPTH} tail_block={cfg.FLOOD_TAIL_BLOCK}")
     print(f"[输出] ckpt={cfg.CHECKPOINT_PATH} | best={cfg.BEST_MODEL_PATH} | "
           f"history={cfg.HISTORY_JSON_PATH}")
+    # test18：公式模式装载状态库（本 run 全程共用；断点续训同样重新装载——
+    # 库不入 checkpoint，跨进程由路径重建）
+    global _FORMULA_BANK
+    if getattr(cfg, 'FIT_MODE', '') == 'formula':
+        if not getattr(cfg, 'FORMULA_BANK_PATH', None):
+            raise SystemExit('[错误] --fit-mode formula 需要 --formula-bank'
+                             '（先用 exp18_bank_build.py 生成）')
+        _FORMULA_BANK = load_formula_bank(cfg.FORMULA_BANK_PATH, cfg, device)
+        _lay_cnt = [int((_FORMULA_BANK['layer'] == i).sum().item())
+                    for i in range(len(_FORMULA_BANK['layers']))]
+        print(f"[test18] 公式状态库 {cfg.FORMULA_BANK_PATH}："
+              f"{_FORMULA_BANK['body_len'].shape[0]} 态 | "
+              f"分层 {list(zip(_FORMULA_BANK['layers'], _lay_cnt))} | "
+              f"enc={_FORMULA_BANK['obs_enc_version']} | "
+              f"退火 {'gen ' + str(cfg.FORMULA_ANNEAL_GEN) if getattr(cfg, 'FORMULA_ANNEAL_GEN', None) is not None else '关'}")
     t_program = time.perf_counter()
 
     start_gen = 0
@@ -3184,7 +3700,9 @@ def run_training(cfg):
                'tau_mean': [], 'tau_std': [], 'wei_mean': [], 'wei_std': [],
                'wie_mean': [], 'wie_std': [],
                'wii_mean': [], 'wii_std': [],
-               'wee_mean': [], 'wee_std': []}
+               'wee_mean': [], 'wee_std': [],
+               # test18：公式一致度遥测（非 formula 模式恒 0 占位）
+               'best_bank': [], 'best_opagree': [], 'avg_bank': []}
     cum_eval_time = 0.0
     cum_evolve_time = 0.0
     best_state = None
@@ -3216,7 +3734,8 @@ def run_training(cfg):
                       'rec_newmass_pop', 'rec_newmass_popmax', 'rec_newnz_pop',
                       'tau_mean', 'tau_std', 'wei_mean', 'wei_std',
                       'wie_mean', 'wie_std', 'wii_mean', 'wii_std',
-                      'wee_mean', 'wee_std'):
+                      'wee_mean', 'wee_std',
+                      'best_bank', 'best_opagree', 'avg_bank'):
                 history.setdefault(k, [])
             # 跨版本续训（如 7g 断点）时补齐新键长度，避免曲线错位
             for k in ('elite_food', 'best_fit', 'best_turneff',
@@ -3227,7 +3746,8 @@ def run_training(cfg):
                       'rec_nz', 'rec_edges', 'rec_newmass',
                       'rec_newmass_pop', 'rec_newmass_popmax', 'rec_newnz_pop',
                       'tau_mean', 'tau_std', 'wei_mean', 'wei_std',
-                      'wie_mean', 'wie_std', 'wii_mean', 'wii_std'):
+                      'wie_mean', 'wie_std', 'wii_mean', 'wii_std',
+                      'best_bank', 'best_opagree', 'avg_bank'):
                 pad = len(history.get('gen', [])) - len(history[k])
                 if pad > 0:
                     history[k].extend([None] * pad)
@@ -3294,6 +3814,20 @@ def run_training(cfg):
 
     try:
         for gen in range(start_gen, cfg.GENERATIONS):
+            # test18：退火切换（--formula-anneal-gen N）——第 N 代起选择键
+            # formula→(simple, bank一致率)，从"像公式"转向"分数优先、公式裁决平局"。
+            # 切换代重置 best 追踪（键形式跨代不可比；断点续训由 gen>=N 自然恢复）
+            if (getattr(cfg, 'FORMULA_ANNEAL_GEN', None) is not None
+                    and not bool(getattr(cfg, '_FD_ANNEALED', False))
+                    and gen >= int(cfg.FORMULA_ANNEAL_GEN)):
+                cfg._FD_ANNEALED = True
+                best_row = np.zeros(22)
+                best_row[1] = 99999.0
+                best_K = int(cfg.STAGE1_EPS) + int(cfg.EVAL_EPISODES)
+                best_state = None
+                best_food = -1.0
+                print(f"  [test18 退火] gen {gen} 起选择键 → (simple, bank一致率)，"
+                      f"best 追踪已重置")
             t_eval = time.perf_counter()
             # --- 自适应 K2（test16a）：按历史 BestFood 运行最大值保分辨率 δ ---
             #    σ_ε ≈ SEL_CV·S/√(K1+K2) ≤ δ  →  K2 = (SEL_CV·S/δ)² − K1
@@ -3353,6 +3887,10 @@ def run_training(cfg):
             history['best_epref'].append(float(mn[best_idx][18]))   # edge_share
             history['best_conn'].append(float(mn[best_idx][16]))    # conn_score
             history['best_straight'].append(float(mn[best_idx][17]))
+            # test18：公式一致度遥测（[21]bank / [19]on-policy；非 formula 模式为 0）
+            history['best_bank'].append(float(mn[best_idx][21]))
+            history['best_opagree'].append(float(mn[best_idx][19]))
+            history['avg_bank'].append(float(np.mean(mn[:, 21])))
 
             # best 个体循环连接遥测（§9 扇入扩容：rec_newmass 应随代上升=接管信号）
             r_nz, r_edges, r_newmass = rec_telemetry(
@@ -3449,6 +3987,12 @@ def run_training(cfg):
                       f"Die(W/S/St): {avg_wall:.2f}/{avg_self:.2f}/{avg_starve:.2f} | "
                       f"K2={k2_t} σ_ε≈{cfg.SEL_CV * max(b_food, 1.0) / math.sqrt(K_eff):.2f} | "
                       f"eval {eval_time:.1f}s / evolve {evolve_time:.1f}s")
+                if getattr(cfg, 'FIT_MODE', '') == 'formula':
+                    print(f"  [test18] BestBank: {float(mn[best_idx][21]):.4f} | "
+                          f"AvgBank: {float(np.mean(mn[:, 21])):.4f} | "
+                          f"BestOpAgree: {float(mn[best_idx][19]):.4f} | "
+                          f"OpAgreeSteps: {float(mn[best_idx][20]):.1f} | "
+                          f"annealed={bool(getattr(cfg, '_FD_ANNEALED', False))}")
                 print(f"  [params] tau {pt['tau_mean']:.3f}±{pt['tau_std']:.3f} | "
                       f"w_ei {pt['wei_mean']:.2f}±{pt['wei_std']:.2f} | "
                       f"w_ie {pt['wie_mean']:.2f}±{pt['wie_std']:.2f} | "
@@ -4045,8 +4589,9 @@ def selfcheck(cfg):
     try:
         import importlib.util as _ilu
         _spec = _ilu.spec_from_file_location(
-            'cheat7b_ref', os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                        'experiments', 'test16_series', 'test16c_cheat7b.py'))
+            'cheat7b_ref', os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                'experiments', 'test16_series', 'test16c_cheat7b.py'))
         _ref = _ilu.module_from_spec(_spec)
         sys.modules['cheat7b_ref'] = _ref
         _spec.loader.exec_module(_ref)
@@ -4191,7 +4736,7 @@ def selfcheck(cfg):
         tau12[sl] = (tau12[sl] + torch.randn_like(tau12[sl]) * 0.05).clamp(
             sc_rb.TAU_E_MIN, sc_rb.TAU_E_MAX)
     big12.refresh_eff()
-    m_big = _eval_pop_banks(big12, sc_rb, banks12).view(P12, 2, 19)
+    m_big = _eval_pop_banks(big12, sc_rb, banks12).view(P12, 2, 22)
     d12n = float((m_big[:, 0] - m_big[:, 1]).abs().max())
     ok12 = ok12 and (d12n > 0.0)
     print(f"  σ>0: 副本行为差异 max|Δ| = {d12n:.2e}（期望 >0）"
@@ -4494,9 +5039,158 @@ def selfcheck(cfg):
           f"零w_ee≡无w_ee逐位: {eq_zero19} | 非零确定性: {det19} | "
           f"生效差异>0: {diff19} | 往返: {rt19} {'OK' if ok18 else 'FAIL'}")
 
+    print("=== 自检 19（test18）：V5 公式教师 + 公式反哺选择键 ===")
+    random.seed(619)
+    torch.manual_seed(61)
+    sc_fd = Config()
+    sc_fd.DEVICE = cfg.DEVICE
+    sc_fd.OBS_MODE = '32proj'
+    apply_obs_mode(sc_fd)
+    sc_fd.USE_FP16 = False
+    dev_fd = _resolve_device(sc_fd)
+    G_ = sc_fd.GRID_SIZE
+    DIRS4 = [(0, 1), (1, 0), (0, -1), (-1, 0)]
+
+    def _rand_snake(length):
+        """随机自回避蛇（头在 body[0]），返回 (body, dir_idx, food)。"""
+        for _ in range(300):
+            body = [(random.randrange(G_), random.randrange(G_))]
+            cur = random.randrange(4)
+            while len(body) < length:
+                cand = []
+                for turn in (0, -1, 1):
+                    nd = (cur + turn) % 4
+                    nxt = (body[-1][0] + DIRS4[nd][0], body[-1][1] + DIRS4[nd][1])
+                    if (0 <= nxt[0] < G_ and 0 <= nxt[1] < G_
+                            and nxt not in body):
+                        cand.append((nd, nxt))
+                if not cand:
+                    break
+                nd, nxt = random.choice(cand)
+                body.append(nxt)
+                cur = nd
+            if len(body) == length and length >= 2:
+                v = (body[0][0] - body[1][0], body[0][1] - body[1][1])
+                if v not in DIRS4:
+                    continue
+                d0 = DIRS4.index(v)
+                free = [(i, j) for i in range(G_) for j in range(G_)
+                        if (i, j) not in body]
+                f = random.choice(free)
+                return body, d0, f
+        return [(5, 5), (5, 4)], 0, (0, 0)
+
+    # ①批量教师 vs 标量参考：各蛇长层分层采样（含长蛇拓扑态）
+    n_states = 600
+    states = []
+    for i in range(n_states):
+        layer = i % 5
+        lo, hi = _FORMULA_BANK_LAYERS[layer]
+        states.append(_rand_snake(random.randint(max(2, lo), hi)))
+    body_t = torch.zeros(n_states, G_ * G_, 2, dtype=torch.long, device=dev_fd)
+    blen_t = torch.zeros(n_states, dtype=torch.long, device=dev_fd)
+    head_t = torch.zeros(n_states, 2, dtype=torch.long, device=dev_fd)
+    dir_t = torch.zeros(n_states, dtype=torch.long, device=dev_fd)
+    food_t = torch.zeros(n_states, 2, dtype=torch.long, device=dev_fd)
+    for i, (body, d0, f) in enumerate(states):
+        blen_t[i] = len(body)
+        for j, cell in enumerate(body):
+            body_t[i, j, 0], body_t[i, j, 1] = cell
+        head_t[i, 0], head_t[i, 1] = body[0]
+        dir_t[i] = d0
+        food_t[i, 0], food_t[i, 1] = f
+    fteacher = FormulaTeacherV5(G_, dev_fd)
+    batch_act = fteacher.act(head_t, food_t, body_t, blen_t, dir_t,
+                             body_t[:, 1]).cpu().numpy()
+    mismatch_cnt = 0
+    for i, (body, d0, f) in enumerate(states):
+        ref = formula_v5_scalar(body_t[i].cpu().numpy(), int(blen_t[i]),
+                                int(dir_t[i]), food_t[i].cpu().numpy(), G_)
+        if int(batch_act[i]) != int(ref):
+            mismatch_cnt += 1
+    eq_19a = mismatch_cnt == 0
+    ok19 = eq_19a
+    print(f"  批量教师≡标量参考: {n_states - mismatch_cnt}/{n_states} "
+          f"{'OK' if eq_19a else 'FAIL'}")
+
+    # ②bank 一致率：确定性 + 值域（固定库两次评估逐位同）
+    global _FORMULA_BANK
+    _saved_bank = _FORMULA_BANK
+    try:
+        m_bank = 64
+        bank_fake = {
+            'obs_enc_version': sc_fd.OBS_ENC_VERSION, 'grid_size': G_,
+            'body': body_t[:m_bank], 'body_len': blen_t[:m_bank],
+            'head': head_t[:m_bank], 'dir_idx': dir_t[:m_bank],
+            'food': food_t[:m_bank], 'action': torch.as_tensor(batch_act[:m_bank],
+                                                               device=dev_fd),
+            'layer': torch.zeros(m_bank, dtype=torch.long, device=dev_fd),
+            'layers': _FORMULA_BANK_LAYERS, 'obs': None,
+        }
+        _FORMULA_BANK = bank_fake
+        sc_fd.FORMULA_TEACHER = True
+        pop19 = GeneStack(sc_fd, B=4, device=dev_fd)
+        pop19.random_init()
+        pop19.refresh_eff()
+        ag_a = formula_bank_agreement(pop19, sc_fd).cpu()
+        ag_b = formula_bank_agreement(pop19, sc_fd).cpu()
+        det_19 = bool(torch.equal(ag_a, ag_b))
+        rng_19 = bool(((ag_a >= 0) & (ag_a <= 1)).all())
+        # 完美个体不可得，但零初始化网络在随机库上不应恒 0/1（退化检测）
+        nondeg_19 = bool(0.0 < float(ag_a.mean()) < 1.0)
+        ok19 = ok19 and det_19 and rng_19 and nondeg_19
+        print(f"  bank一致率 确定性: {det_19} | 值域[0,1]: {rng_19} | "
+              f"非退化: {nondeg_19}(mean={float(ag_a.mean()):.3f}) "
+              f"{'OK' if det_19 and rng_19 and nondeg_19 else 'FAIL'}")
+    finally:
+        _FORMULA_BANK = _saved_bank
+
+    # ③选择键语义：字典序 bank>一致步数>food；判死垫底；退火键=(simple, bank)
+    sc_fd.FIT_MODE = 'formula'
+    sc_fd.FORMULA_W_BANK = sc_fd.FORMULA_W_STEPS = sc_fd.FORMULA_W_FOOD = None
+    row_a = np.array([50, 5, 0, 900, 0, 0, 0, 0, 1, 1, 10, 1, 0, 0, 0, 0, 1, 1, 1,
+                      0.9, 120.0, 0.90], dtype=np.float64)
+    row_b = row_a.copy(); row_b[21] = 0.91; row_b[0] = 1        # bank 更高，food 极低
+    row_c = row_a.copy(); row_c[20] = 130.0                     # 步数更高，bank 同
+    row_d = row_a.copy(); row_d[0] = 60                          # food 更高，前两键同
+    row_dead = row_a.copy(); row_dead[1] = 99999
+    kf = _make_key_fn(sc_fd)
+    ord_19 = (kf(row_b) > kf(row_a)        # bank 更高者胜（即使 food 仅 1）
+              and kf(row_c) > kf(row_a)    # bank 同 → 一致步数更高者胜
+              and kf(row_d) > kf(row_a)    # 前两键同 → food 更高者胜
+              and kf(row_dead) < kf(row_d))
+    sc_fd._FD_ANNEALED = True
+    kf2 = _make_key_fn(sc_fd)
+    row_e = row_a.copy(); row_e[0] = 70                          # simple 分更高
+    ord_19b = kf2(row_e) > kf2(row_a) and isinstance(kf2(row_a), tuple)
+    del sc_fd._FD_ANNEALED
+    ok19 = ok19 and ord_19 and ord_19b
+    print(f"  字典序键 bank>steps>food+判死垫底: {ord_19} | 退火键=(simple,bank): "
+          f"{ord_19b} {'OK' if ord_19 and ord_19b else 'FAIL'}")
+
+    # ④metrics 扩列：chunk 输出 [B,22]（formula 教师开/关各一次，关闭=后三列 0）
+    sc_fd2 = Config()
+    sc_fd2.DEVICE = cfg.DEVICE
+    sc_fd2.USE_FP16 = False
+    sc_fd2.MAX_STEPS = 30
+    pop19b = GeneStack(sc_fd2, B=4, device=_resolve_device(sc_fd2))
+    pop19b.random_init()
+    pop19b.refresh_eff()
+    m_off = _eval_sweep_chunk(pop19b, sc_fd2, None)
+    shape_off = tuple(m_off.shape) == (4, 22)
+    zero_off = bool((m_off[:, 19:] == 0).all())
+    sc_fd2.FORMULA_TEACHER = True
+    m_on = _eval_sweep_chunk(pop19b, sc_fd2, None)
+    shape_on = tuple(m_on.shape) == (4, 22)
+    f19_steps = float(m_on[:, 20].sum()) > 0
+    ok19 = ok19 and shape_off and zero_off and shape_on and f19_steps
+    print(f"  chunk metrics [B,22]: {shape_off} | 关闭时后三列恒0: {zero_off} | "
+          f"教师开时一致步数>0: {f19_steps} "
+          f"{'OK' if shape_off and zero_off and shape_on and f19_steps else 'FAIL'}")
+
     verdict = (ok9 and ok10 and ok11 and ok12 and ok13 and ok14 and ok15
-               and ok16 and ok17 and ok18)
-    print(f"=== 扩展自检（9-18）{'全部通过' if verdict else '存在 FAIL'} ===")
+               and ok16 and ok17 and ok18 and ok19)
+    print(f"=== 扩展自检（9-19）{'全部通过' if verdict else '存在 FAIL'} ===")
     print("=== 自检完成 ===")
 
 
@@ -4565,8 +5259,26 @@ def main():
     ap.add_argument('--max-steps', type=int, default=None)
     ap.add_argument('--device', type=str, default=None)
     ap.add_argument('--fit-mode', type=str, default=None,
-                    choices=['econ', 'simple', 'tuple'],
-                    help='econ=v7 乘法式（默认）| simple=食物+k·效率最简回退 | tuple=旧')
+                    choices=['econ', 'simple', 'tuple', 'formula'],
+                    help='econ=v7 乘法式 | simple=食物+k·效率最简回退 | tuple=旧 | '
+                         'formula=test18 公式反哺（字典序键 bank一致率>一致步数>food，'
+                         '需 --formula-bank）')
+    ap.add_argument('--formula-bank', type=str, default=None,
+                    help='test18 公式状态库 .pt（exp18_bank_build.py 生成；'
+                         '--fit-mode formula 必填；按当前 --obs 编码校验）')
+    ap.add_argument('--formula-anneal-gen', type=int, default=None,
+                    help='test18：第 N 代起选择键切换为 (simple适应度, bank一致率)'
+                         '——从"像公式"转向分数优先（切换代重置 best 追踪）')
+    ap.add_argument('--formula-w-bank', type=float, default=None,
+                    help='test18 软模式：bank 一致率权重（任一 --formula-w-* 给定'
+                         '即从字典序硬键切换为加权和，对照用）')
+    ap.add_argument('--formula-w-steps', type=float, default=None,
+                    help='test18 软模式：on-policy 一致步数权重（归一上限 '
+                         '--formula-steps-cap）')
+    ap.add_argument('--formula-w-food', type=float, default=None,
+                    help='test18 软模式：food 权重')
+    ap.add_argument('--formula-steps-cap', type=float, default=None,
+                    help='test18 软模式一致步数归一上限（默认 200）')
     ap.add_argument('--eff-weight', type=float, default=None,
                     help='econ 模式效率因子 W_EFF')
     ap.add_argument('--simple-eff-w', type=float, default=None,
@@ -4726,14 +5438,35 @@ def main():
         cfg.DEVICE = args.device
     if args.fit_mode:
         cfg.FIT_MODE = args.fit_mode
-        # 口径版本：simple=9（默认/推荐，所有最优模型出自此口径）；econ=8（对照）
-        cfg.FITNESS_VERSION = 9 if args.fit_mode == 'simple' else 8
+        # 口径版本：simple=9（默认/推荐）/ econ=8（对照）/ formula=28（test18 公式反哺）
+        cfg.FITNESS_VERSION = {'simple': 9, 'econ': 8, 'tuple': 8,
+                               'formula': 28}[args.fit_mode]
         if not args.smoke:
-            arm = {'econ': 'econ', 'simple': 'simp', 'tuple': 'tup'}[args.fit_mode]
-            cfg.CHECKPOINT_PATH = f'snake_std_{arm}_checkpoint.pth'
-            cfg.BEST_MODEL_PATH = f'snake_std_{arm}_best_model.pth'
-            cfg.LATEST_GEN_BEST_MODEL_PATH = f'snake_std_{arm}_latest_gen_best.pth'
-            cfg.HISTORY_JSON_PATH = f'snake_std_{arm}_history.json'
+            arm = {'econ': 'econ', 'simple': 'simp', 'tuple': 'tup',
+                   'formula': 'fd'}[args.fit_mode]
+            cfg.CHECKPOINT_PATH = f'test18a_{arm}_checkpoint.pth'
+            cfg.BEST_MODEL_PATH = f'test18a_{arm}_best_model.pth'
+            cfg.LATEST_GEN_BEST_MODEL_PATH = f'test18a_{arm}_latest_gen_best.pth'
+            cfg.HISTORY_JSON_PATH = f'test18a_{arm}_history.json'
+    # test18：公式反哺开关（--fit-mode formula 配套；默认全关=snake_std 逐位口径）
+    if args.fit_mode == 'formula':
+        cfg.FORMULA_TEACHER = True
+        if not args.formula_bank and not args.smoke:
+            sys.exit('[错误] --fit-mode formula 需要 --formula-bank '
+                     '（先用 exp18_bank_build.py 生成公式状态库）')
+        cfg.FORMULA_BANK_PATH = args.formula_bank
+    if args.formula_bank:
+        cfg.FORMULA_BANK_PATH = args.formula_bank
+    if args.formula_anneal_gen is not None:
+        cfg.FORMULA_ANNEAL_GEN = max(1, int(args.formula_anneal_gen))
+    if args.formula_w_bank is not None:
+        cfg.FORMULA_W_BANK = float(args.formula_w_bank)
+    if args.formula_w_steps is not None:
+        cfg.FORMULA_W_STEPS = float(args.formula_w_steps)
+    if args.formula_w_food is not None:
+        cfg.FORMULA_W_FOOD = float(args.formula_w_food)
+    if args.formula_steps_cap is not None:
+        cfg.FORMULA_STEPS_CAP = max(1.0, float(args.formula_steps_cap))
     if args.eff_weight is not None:
         cfg.W_EFF = args.eff_weight
     if args.simple_eff_w is not None:
@@ -4759,10 +5492,10 @@ def main():
     if args.no_one_sided_death:
         cfg.ONE_SIDED_TURN_DEATH = False
     if args.name:
-        cfg.CHECKPOINT_PATH = f'snake_std_{args.name}_checkpoint.pth'
-        cfg.BEST_MODEL_PATH = f'snake_std_{args.name}_best_model.pth'
-        cfg.LATEST_GEN_BEST_MODEL_PATH = f'snake_std_{args.name}_latest_gen_best.pth'
-        cfg.HISTORY_JSON_PATH = f'snake_std_{args.name}_history.json'
+        cfg.CHECKPOINT_PATH = f'test18a_{args.name}_checkpoint.pth'
+        cfg.BEST_MODEL_PATH = f'test18a_{args.name}_best_model.pth'
+        cfg.LATEST_GEN_BEST_MODEL_PATH = f'test18a_{args.name}_latest_gen_best.pth'
+        cfg.HISTORY_JSON_PATH = f'test18a_{args.name}_history.json'
     if args.resume_pop:
         payload = torch.load(args.resume_pop, map_location='cpu', weights_only=False)
         saved = payload.get('config', {})

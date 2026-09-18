@@ -25,5 +25,30 @@ results/tmp/
 notify_token.txt
 deploy_*/
 
+# snake_std 根目录默认/冒烟输出（训练产物归档至 artifacts/，不回根目录）
+/snake_std_best_model.pth
+/snake_std_latest_gen_best.pth
+/snake_std_history.json
+/snake_std_history.png
+/snake_std_smoke_*
+/snake_std_fd_timing_*
+
+# V5 公式脚本默认输出
+/SiNNtry_V5_run_result.json
+
+# 外部整理稿 PDF（结论口径以 docs 实验日志为准，不入库）
+docs/*.pdf
+
+# 独立交付包（本地保留，不入库）
+SiNNtry_7b_distillation_code/
+
+# 超 GitHub 单文件限额的大文件（可按 README「归档模型」一节命令重生成）
+experiments/test5b/dataset.npz
+experiments/test5c/*.npz
+experiments/test7_series/test7a_arm_*.pth
+experiments/test7_series/test7h_anneal_*.pth
+experiments/test7_series/test7h_imit_*.pth
+experiments/test7_series/test7h_prox_*.pth
+
 # VS Code
 .vscode/

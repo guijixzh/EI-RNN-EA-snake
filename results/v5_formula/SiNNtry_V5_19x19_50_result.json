@@ -1,0 +1,329 @@
+{
+  "grid_size": 19,
+  "episodes": 50,
+  "seed_start": 20273000,
+  "seed_end": 20273049,
+  "max_steps": 30000,
+  "theoretical_max_food": 359,
+  "food_mean": 355.72,
+  "food_median": 356.0,
+  "food_std": 2.02070910972422,
+  "food_min": 346,
+  "food_max": 358,
+  "capacity_ratio_mean": 0.9908635097493037,
+  "ge90pct": 50,
+  "ge95pct": 50,
+  "ge98pct": 49,
+  "ge350": 49,
+  "ge355": 35,
+  "ge358": 12,
+  "perfect359": 0,
+  "death_wall": 0,
+  "death_self": 0,
+  "death_starve": 50,
+  "alive_cutoff": 0,
+  "steps_mean": 23669.58,
+  "runtime_sec": 24.26105761528015,
+  "rows": [
+    {
+      "seed": 20273000,
+      "food": 356,
+      "steps": 24225,
+      "death": 3
+    },
+    {
+      "seed": 20273001,
+      "food": 356,
+      "steps": 23617,
+      "death": 3
+    },
+    {
+      "seed": 20273002,
+      "food": 356,
+      "steps": 23870,
+      "death": 3
+    },
+    {
+      "seed": 20273003,
+      "food": 354,
+      "steps": 23481,
+      "death": 3
+    },
+    {
+      "seed": 20273004,
+      "food": 356,
+      "steps": 23430,
+      "death": 3
+    },
+    {
+      "seed": 20273005,
+      "food": 358,
+      "steps": 21416,
+      "death": 3
+    },
+    {
+      "seed": 20273006,
+      "food": 358,
+      "steps": 22576,
+      "death": 3
+    },
+    {
+      "seed": 20273007,
+      "food": 356,
+      "steps": 23375,
+      "death": 3
+    },
+    {
+      "seed": 20273008,
+      "food": 356,
+      "steps": 25204,
+      "death": 3
+    },
+    {
+      "seed": 20273009,
+      "food": 356,
+      "steps": 20508,
+      "death": 3
+    },
+    {
+      "seed": 20273010,
+      "food": 354,
+      "steps": 24186,
+      "death": 3
+    },
+    {
+      "seed": 20273011,
+      "food": 358,
+      "steps": 24627,
+      "death": 3
+    },
+    {
+      "seed": 20273012,
+      "food": 356,
+      "steps": 25477,
+      "death": 3
+    },
+    {
+      "seed": 20273013,
+      "food": 358,
+      "steps": 23652,
+      "death": 3
+    },
+    {
+      "seed": 20273014,
+      "food": 358,
+      "steps": 21629,
+      "death": 3
+    },
+    {
+      "seed": 20273015,
+      "food": 358,
+      "steps": 22273,
+      "death": 3
+    },
+    {
+      "seed": 20273016,
+      "food": 356,
+      "steps": 24655,
+      "death": 3
+    },
+    {
+      "seed": 20273017,
+      "food": 354,
+      "steps": 21136,
+      "death": 3
+    },
+    {
+      "seed": 20273018,
+      "food": 356,
+      "steps": 26575,
+      "death": 3
+    },
+    {
+      "seed": 20273019,
+      "food": 354,
+      "steps": 23496,
+      "death": 3
+    },
+    {
+      "seed": 20273020,
+      "food": 354,
+      "steps": 22651,
+      "death": 3
+    },
+    {
+      "seed": 20273021,
+      "food": 358,
+      "steps": 22433,
+      "death": 3
+    },
+    {
+      "seed": 20273022,
+      "food": 354,
+      "steps": 23503,
+      "death": 3
+    },
+    {
+      "seed": 20273023,
+      "food": 356,
+      "steps": 23325,
+      "death": 3
+    },
+    {
+      "seed": 20273024,
+      "food": 356,
+      "steps": 21599,
+      "death": 3
+    },
+    {
+      "seed": 20273025,
+      "food": 354,
+      "steps": 23503,
+      "death": 3
+    },
+    {
+      "seed": 20273026,
+      "food": 356,
+      "steps": 25095,
+      "death": 3
+    },
+    {
+      "seed": 20273027,
+      "food": 358,
+      "steps": 24046,
+      "death": 3
+    },
+    {
+      "seed": 20273028,
+      "food": 354,
+      "steps": 24513,
+      "death": 3
+    },
+    {
+      "seed": 20273029,
+      "food": 358,
+      "steps": 22642,
+      "death": 3
+    },
+    {
+      "seed": 20273030,
+      "food": 356,
+      "steps": 24524,
+      "death": 3
+    },
+    {
+      "seed": 20273031,
+      "food": 354,
+      "steps": 22173,
+      "death": 3
+    },
+    {
+      "seed": 20273032,
+      "food": 354,
+      "steps": 24071,
+      "death": 3
+    },
+    {
+      "seed": 20273033,
+      "food": 356,
+      "steps": 25356,
+      "death": 3
+    },
+    {
+      "seed": 20273034,
+      "food": 356,
+      "steps": 23441,
+      "death": 3
+    },
+    {
+      "seed": 20273035,
+      "food": 356,
+      "steps": 25819,
+      "death": 3
+    },
+    {
+      "seed": 20273036,
+      "food": 354,
+      "steps": 25563,
+      "death": 3
+    },
+    {
+      "seed": 20273037,
+      "food": 356,
+      "steps": 23723,
+      "death": 3
+    },
+    {
+      "seed": 20273038,
+      "food": 356,
+      "steps": 22524,
+      "death": 3
+    },
+    {
+      "seed": 20273039,
+      "food": 356,
+      "steps": 23434,
+      "death": 3
+    },
+    {
+      "seed": 20273040,
+      "food": 356,
+      "steps": 25088,
+      "death": 3
+    },
+    {
+      "seed": 20273041,
+      "food": 358,
+      "steps": 27055,
+      "death": 3
+    },
+    {
+      "seed": 20273042,
+      "food": 354,
+      "steps": 22754,
+      "death": 3
+    },
+    {
+      "seed": 20273043,
+      "food": 354,
+      "steps": 25093,
+      "death": 3
+    },
+    {
+      "seed": 20273044,
+      "food": 346,
+      "steps": 21417,
+      "death": 3
+    },
+    {
+      "seed": 20273045,
+      "food": 354,
+      "steps": 24393,
+      "death": 3
+    },
+    {
+      "seed": 20273046,
+      "food": 356,
+      "steps": 23831,
+      "death": 3
+    },
+    {
+      "seed": 20273047,
+      "food": 356,
+      "steps": 21877,
+      "death": 3
+    },
+    {
+      "seed": 20273048,
+      "food": 358,
+      "steps": 24241,
+      "death": 3
+    },
+    {
+      "seed": 20273049,
+      "food": 358,
+      "steps": 24384,
+      "death": 3
+    }
+  ]
+}

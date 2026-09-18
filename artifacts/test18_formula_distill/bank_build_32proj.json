@@ -1,0 +1,50 @@
+{
+  "total": 4096,
+  "per_layer": [
+    1200,
+    1000,
+    900,
+    700,
+    296
+  ],
+  "quota": [
+    1200,
+    1000,
+    900,
+    700,
+    296
+  ],
+  "layers": [
+    [
+      3,
+      10
+    ],
+    [
+      11,
+      30
+    ],
+    [
+      31,
+      60
+    ],
+    [
+      61,
+      90
+    ],
+    [
+      91,
+      98
+    ]
+  ],
+  "act_dist": {
+    "0": 2989,
+    "1": 583,
+    "2": 524
+  },
+  "obs_enc_version": "32proj7b",
+  "starve_slope": 3.0,
+  "seed": 20260913,
+  "replay_check_bad": 0,
+  "runtime_sec": 26.05306100845337,
+  "out": "experiments\\test18_formula_distill\\formula_bank_32proj_v1.pt"
+}

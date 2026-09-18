@@ -1,0 +1,64 @@
+{
+  "device": "cuda",
+  "gate1": {
+    "synth": {
+      "n": 2000,
+      "mismatch": 0,
+      "per_layer": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "len_dist": [
+        400,
+        400,
+        400,
+        400,
+        400
+      ]
+    },
+    "rollout": {
+      "n": 600,
+      "mismatch": 0,
+      "rollout_steps": 1376
+    },
+    "pass": true,
+    "coverage": {
+      "sampled": 400,
+      "any_candidate_R0": 180,
+      "food_unreachable_state": 140
+    }
+  },
+  "gate2": {
+    "fork_env": {
+      "episodes": 100,
+      "food_mean": 96.47,
+      "food_median": 96.0,
+      "food_min": 90,
+      "food_max": 98,
+      "perfect98": 41,
+      "death_wall": 6,
+      "death_self": 35,
+      "death_starve": 59,
+      "steps": 2755,
+      "runtime_sec": 31.00058364868164
+    },
+    "v5_env": {
+      "food_mean": 96.16,
+      "food_median": 96.0,
+      "food_min": 92,
+      "food_max": 98,
+      "perfect98": 36,
+      "death_wall": 10,
+      "death_self": 26,
+      "death_starve": 64,
+      "runtime_sec": 26.42873764038086
+    },
+    "mean_abs_diff": 0.3100000000000023,
+    "pass": true
+  },
+  "total_sec": 70.48070359230042,
+  "pass": true
+}

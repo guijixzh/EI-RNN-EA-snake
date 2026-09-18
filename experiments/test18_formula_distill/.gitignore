@@ -1,0 +1,5 @@
+# test18 训练产物（归档至 artifacts/test18_formula_distill 与 results/test18_formula_distill）
+test18a_*_best_model.pth
+test18a_*_latest_gen_best.pth
+test18a_*_history.json
+test18a_*_history.png

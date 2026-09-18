@@ -1,0 +1,261 @@
+{
+  "protocol": {
+    "obs": "32proj",
+    "starve": 3.0,
+    "episodes": 100,
+    "seed": 20260913
+  },
+  "models": {
+    "test18a_fd_scratch_best_model": {
+      "episodes": 100,
+      "food_mean": 0.77,
+      "food_median": 0.0,
+      "food_std": 1.2379112417391815,
+      "food_min": 0,
+      "food_max": 5,
+      "ge62": 0,
+      "ge80": 0,
+      "ge90": 0,
+      "perfect98": 0,
+      "death_wall": 97,
+      "death_self": 0,
+      "death_starve": 3,
+      "onpolicy_agree_by_layer": [
+        0.6090775988286969,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "onpolicy_layer_coverage": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "onpolicy_agree_total": 0.6090775988286969,
+      "runtime_sec": 0.9756324291229248,
+      "checkpoint_food": 0.0833333358168602,
+      "bank_agree_total": 0.7958984375,
+      "bank_agree_by_layer": {
+        "0": 0.8100000023841858,
+        "1": 0.8220000267028809,
+        "2": 0.7722222208976746,
+        "3": 0.7928571105003357,
+        "4": 0.7297297716140747
+      }
+    },
+    "test18a_fd_7b_best_model": {
+      "episodes": 100,
+      "food_mean": 38.13,
+      "food_median": 39.0,
+      "food_std": 9.55119644522892,
+      "food_min": 6,
+      "food_max": 56,
+      "ge62": 0,
+      "ge80": 0,
+      "ge90": 0,
+      "perfect98": 0,
+      "death_wall": 44,
+      "death_self": 54,
+      "death_starve": 2,
+      "onpolicy_agree_by_layer": [
+        0.8194020744356315,
+        0.7646014776901804,
+        0.7571714476317545,
+        0.0,
+        0.0
+      ],
+      "onpolicy_layer_coverage": [
+        0.16256695100178536,
+        0.48059908748264235,
+        0.3568339615155723,
+        0.0,
+        0.0
+      ],
+      "onpolicy_agree_total": 0.7708589565562388,
+      "runtime_sec": 13.748616456985474,
+      "checkpoint_food": 40.16666793823242,
+      "bank_agree_total": 0.83349609375,
+      "bank_agree_by_layer": {
+        "0": 0.8700000047683716,
+        "1": 0.8510000109672546,
+        "2": 0.800000011920929,
+        "3": 0.8271428346633911,
+        "4": 0.7432432770729065
+      }
+    },
+    "test18a_fd_7b_anneal_best_model": {
+      "episodes": 100,
+      "food_mean": 51.14,
+      "food_median": 55.0,
+      "food_std": 14.194905900898164,
+      "food_min": 3,
+      "food_max": 69,
+      "ge62": 11,
+      "ge80": 0,
+      "ge90": 0,
+      "perfect98": 0,
+      "death_wall": 26,
+      "death_self": 58,
+      "death_starve": 16,
+      "onpolicy_agree_by_layer": [
+        0.686017559952824,
+        0.5767574275494561,
+        0.5118966557070874,
+        0.5201517306780464,
+        0.0
+      ],
+      "onpolicy_layer_coverage": [
+        0.08618800754469781,
+        0.30944555506612903,
+        0.5805464258688262,
+        0.023820011520346965,
+        0.0
+      ],
+      "onpolicy_agree_total": 0.5471713030415974,
+      "runtime_sec": 19.85623550415039,
+      "checkpoint_food": 60.41666793823242,
+      "bank_agree_total": 0.6591796875,
+      "bank_agree_by_layer": {
+        "0": 0.7458333373069763,
+        "1": 0.7200000286102295,
+        "2": 0.5944444537162781,
+        "3": 0.5685714483261108,
+        "4": 0.5135135054588318
+      }
+    },
+    "test18a_ctrl_simple_7b_best_model": {
+      "episodes": 100,
+      "food_mean": 57.4,
+      "food_median": 59.0,
+      "food_std": 8.270673515744676,
+      "food_min": 16,
+      "food_max": 67,
+      "ge62": 22,
+      "ge80": 0,
+      "ge90": 0,
+      "perfect98": 0,
+      "death_wall": 11,
+      "death_self": 82,
+      "death_starve": 7,
+      "onpolicy_agree_by_layer": [
+        0.6860565819861432,
+        0.5406169481820784,
+        0.49054336554130795,
+        0.5076611086074808,
+        0.0
+      ],
+      "onpolicy_layer_coverage": [
+        0.06923776496337235,
+        0.2792696455162351,
+        0.6071396448166618,
+        0.044352944703730725,
+        0.0
+      ],
+      "onpolicy_agree_total": 0.518823517654231,
+      "runtime_sec": 19.741132020950317,
+      "checkpoint_food": 63.41666793823242,
+      "bank_agree_total": 0.619384765625,
+      "bank_agree_by_layer": {
+        "0": 0.6883333325386047,
+        "1": 0.659000039100647,
+        "2": 0.5477777719497681,
+        "3": 0.5514285564422607,
+        "4": 0.5844594836235046
+      }
+    },
+    "test18a_ctrl_simple_scratch_best_model": {
+      "episodes": 100,
+      "food_mean": 23.77,
+      "food_median": 23.0,
+      "food_std": 8.733836441673214,
+      "food_min": 1,
+      "food_max": 42,
+      "ge62": 0,
+      "ge80": 0,
+      "ge90": 0,
+      "perfect98": 0,
+      "death_wall": 26,
+      "death_self": 73,
+      "death_starve": 1,
+      "onpolicy_agree_by_layer": [
+        0.43847183606219753,
+        0.48906830101950616,
+        0.566296883254094,
+        0.0,
+        0.0
+      ],
+      "onpolicy_layer_coverage": [
+        0.3398663073530956,
+        0.593882336471494,
+        0.06625135617541035,
+        0.0,
+        0.0
+      ],
+      "onpolicy_agree_total": 0.476988765617891,
+      "runtime_sec": 7.990354776382446,
+      "checkpoint_food": 30.58333396911621,
+      "bank_agree_total": 0.509765625,
+      "bank_agree_by_layer": {
+        "0": 0.4025000035762787,
+        "1": 0.5020000338554382,
+        "2": 0.5077778100967407,
+        "3": 0.6714285612106323,
+        "4": 0.5945945978164673
+      }
+    },
+    "test7b_base_model": {
+      "episodes": 100,
+      "food_mean": 52.13,
+      "food_median": 57.0,
+      "food_std": 16.394539002085697,
+      "food_min": 0,
+      "food_max": 68,
+      "ge62": 12,
+      "ge80": 0,
+      "ge90": 0,
+      "perfect98": 0,
+      "death_wall": 12,
+      "death_self": 65,
+      "death_starve": 23,
+      "onpolicy_agree_by_layer": [
+        0.5096488876976681,
+        0.4566837709277501,
+        0.4624499101837778,
+        0.4864321608040201,
+        0.0
+      ],
+      "onpolicy_layer_coverage": [
+        0.07851265756192,
+        0.2809179099766419,
+        0.6091622651038489,
+        0.03140716735758928,
+        0.0
+      ],
+      "onpolicy_agree_total": 0.46528903011300266,
+      "runtime_sec": 20.983311653137207,
+      "checkpoint_food": 61.79999923706055,
+      "bank_agree_total": 0.51220703125,
+      "bank_agree_by_layer": {
+        "0": 0.5866667032241821,
+        "1": 0.5320000052452087,
+        "2": 0.43888890743255615,
+        "3": 0.4471428394317627,
+        "4": 0.5202702879905701
+      }
+    }
+  },
+  "v5_reference": {
+    "food_mean": 96.17,
+    "food_median": 96.0,
+    "food_std": 1.6271372890987896,
+    "food_min": 92,
+    "food_max": 98,
+    "perfect98": 34,
+    "death_wall": 9,
+    "death_self": 25,
+    "death_starve": 66
+  }
+}

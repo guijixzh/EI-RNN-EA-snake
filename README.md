@@ -1,7 +1,7 @@
 # SiNNtry — 用神经进化训练「E-I 皮质柱脑区」玩贪吃蛇
 
 一个把**兴奋-抑制（E-I）皮质柱脑区**当作决策器官、用 GPU 全并行神经进化在贪吃蛇上
-迭代了 16 代实验的研究项目。项目的**进化算法框架、贪吃蛇环境与适应度设计的主要
+进行实验的研究项目。项目的**进化算法框架、贪吃蛇环境与适应度设计的主要
 启发来自 [Ackeraa/snake](https://github.com/Ackeraa/snake) 的 nn_97 前馈进化蛇**
 （其参考实现与预训练权重随仓库附于 `third_party/ackeraa/`）；本项目在其基础上引入
 E-I 循环动力学、稀疏固定扇入基因组与 GPU 全并行种群进化。最终沉淀为两部分：
@@ -78,7 +78,7 @@ E-I 循环动力学、稀疏固定扇入基因组与 GPU 全并行种群进化�
   把"以更低 K 测出的高分"按方差折价；配合**自适应 K2**（σ_ε≤δ 分辨率判据动态加密
   评估），解决"高分是评估噪声"的假冠军问题。
 
-### 5. 适应度：少整形，多杠杆
+### 5. 适应度：
 
 - **`simple`（推荐，默认）**：`food + k·food/steps_last`——效率最简口径。
   **全部最优模型（7b 冠军 61.4、16b_simp 62.7、cheat7b 通关）均出自此口径。**
@@ -90,7 +90,7 @@ E-I 循环动力学、稀疏固定扇入基因组与 GPU 全并行种群进化�
   原权重 + σ=1e-3 权重噪声共 R 份副本评估，取**最差副本**——在"同一张地图上反复
   特化"的设定下过滤"混沌彩票解"（对特定权重实现过拟合的个体）。通用随机盘训练
   不使用该口径。
-- 12 代实验换来的方法论结论：**行为改造的杠杆优先在观测/环境端，适应度整形是弱杠杆**
+- 12 代实验的方法论结论：**行为改造的杠杆优先在观测/环境端，适应度整形是弱杠杆**
   （外围 A/B 实验群全部 NULL，见 docs/test7 系日志）。
 
 ### 6. 观测工程：32 维为主，40 维作迁移性扩展
@@ -113,6 +113,10 @@ E-I 循环动力学、稀疏固定扇入基因组与 GPU 全并行种群进化�
   未证明有益；test5a 式交替需显式 `"G2;G1"`。
 - 其余开关（感觉-运动池约束、固定地图、疲劳、弱连接屏蔽等）同样默认关闭，作为
   已验证机制的可选接口。
+- **test17 系列研究选项**（`--kframe-input/--kframe-read`、`--euler-leak`、
+  `--train-wii/--train-wee`）：围绕"K帧思考的记忆机制"的诊断与构造——先证明原
+  动力学是收缩映射（尾帧失明），再以泄漏积分器构造性引入长记忆并产生实质记忆
+  性质；默认全部关闭（惯性代价在快速训练尺度尚未回本，见[重要结论 4](#4-k帧消融与记忆机制test17-系列研究选项)）。
 
 ### 8. fast-eval：把瓶颈从数学搬到调度
 
@@ -124,7 +128,7 @@ E-I 循环动力学、稀疏固定扇入基因组与 GPU 全并行种群进化�
 
 ## 重要结论
 
-以下三条是全部实验收敛后最值得带走的实证发现：
+以下四条是必要知道的实验发现：
 
 ### 1. 标杆成绩与外部参考模型对比（千局随机地图口径）
 
@@ -138,16 +142,16 @@ E-I 循环动力学、稀疏固定扇入基因组与 GPU 全并行种群进化�
 | 玩家 | 网络 / 观测 | 参数（有效/可进化） | mean / median / max | 说明 |
 |---|---|---|---|---|
 | **test7b 冠军**（特化前基线） | E-I 循环，稠密 N=256；obs32 投影 | 13,972 / 75,267 | **61.4 / 62 / 79** | 效率适应度首冠军（训练期 67.0） |
-| **↳ cheat7b 通关模型**（特化后） | 同血统，稀疏 K=96, N=256；obs32 投影 | 26,589 / 58,883 | **63.2 / 74 / 98** | 固定地图特化到 98/98 通关后千局重评：median +12、随机盘首次整版通关（1/1000），但出现零分盘（p10=0）——**特化以尾部稳健性换头部性能** |
+| **↳ cheat7b 通关模型**（特化后） | 同血统，稀疏 K=96, N=256；obs32 投影 | 26,589 / 58,883 | **63.2 / 74 / 98** | 固定地图特化到 98/98 通关后千局重评：median +12、随机盘首次整版通关（1/1000），但出现零分盘（p10=0）——**特化损失尾部性能** |
 | **test16b_simp（旗舰）** | E-I 循环，稀疏 K=16, N=1024；obs40 | 26,603 / 79,875 | **62.7 / 64 / 75** | 独立训练线（非 7b 特化），作为对照 |
 | Ackeraa nn_97（外部参考） | 前馈 32-20-12-4 | 964 / 964 | 27.3 / 8 / 78 | 40 局 CRN 同库、免饿死钟口径；双峰：要么早死要么大赢 |
 | chuyangliu/snake（外部参考） | 图搜索（BFS+哈密顿，无可学习参数） | —（纯算法） | 48.9 / — / 98 | 40 局 CRN、含饿死钟；作"物理可达上限"参考解法器 |
 
 解读：
 
-- **特化没有付出随机盘代价**——反而 median 62→74、且在随机盘上首次整版通关；
-  损失出现在分布尾部（出现立即死亡的零分局），即特化让策略更"敢赌"。
-- 进化得到的 E-I 循环网络显著强于同量级前馈学习网络（Ackeraa nn_97，964 参数），
+- **特化整体优化随机盘**——没有损失平均分，反而 median 62→74、且在随机盘上首次整版通关；
+  损失出现在分布尾部（出现立即死亡的零分局）。
+- 进化得到的 E-I 循环网络显著强于前馈学习网络（Ackeraa nn_97，964 参数），
   但距离图搜索的"理想解法器"仍有本质差距——**瓶颈在观测/表征，不在搜索**：千局
   死亡以撞墙 36% / 自撞 62% 为主，后期（蛇长 40+）坍缩 91–98% 源于空间挤压自撞
   （test12 期相归因），即网络"看不见"死区，而搜索式解法器看得见。
@@ -172,8 +176,51 @@ E-I 循环动力学、稀疏固定扇入基因组与 GPU 全并行种群进化�
 - **弱权重删除**：删最弱 0–30% 循环连接 ×1000 局基准，均值 61.35 → 61.05/60.67/61.66
   （差 <0.7，组内 std≈7–8）；10–40% 弱连接屏蔽波动 ±1.8 食——剪枝不改变分数，
   只重排死因结构；
-- **权重噪声**：σ=1e-3 微扰副本与原副本成绩差异在噪声量级内（鲁棒最小值口径的
-  作用仅是过滤极少数"混沌彩票解"，而非普遍提升稳定性）。
+- **权重噪声**：σ=1e-3 微扰副本与原副本成绩差异在噪声量级内，鲁棒最小值口径的
+  作用仅是在特化训练中过滤极少数特殊情况，而非普遍提升稳定性。
+
+### 4. K帧消融与记忆机制（test17 系列，研究选项）
+
+对「K 倍帧率思考」的记忆机制做了四步消融/改造（`docs/test17_kft_experiment_log.md`，
+全部为**默认关闭的研究选项**，标准实现内开关门控、默认路径逐位不变）：
+
+- **首帧输入+尾帧读出**（`--kframe-input first --kframe-read tail`）：把 K=5 帧思考
+  改为仅第 0 帧喂观测、取尾帧输出——从零训练完全失败（best_food 0.08 vs 基线
+  25.25）。**机理**：原 E-I 柱动力学是收缩映射（单帧有效增益 <1），观测信息在
+  1~2 个零输入帧内弛豫殆尽，尾帧对观测近乎失明（步内保留率 ~1e-6）——
+  这把结论 2 的"反应式画像"推进到动力学根源；
+- **E 泄漏积分器**（`--euler-leak`）：把 τ 从 sigmoid 内移到外
+  （`E = σ(输入−Wei·I+Wrec·E+w_ee·E) + τ·E`，τ≤1）——构造性地给出每帧增益恰 τ
+  的信息保持通路，尾帧保留率提升 **3 个数量级**，并首次产生**实质记忆**
+  （E 状态漂移 52~97%、历史对输出的影响与换输入同量级，对照旧架构 5.3%/2.4%）；
+- **st σ迹负反馈 + 对称自项**（默认随 `--euler-leak` 启用；`--train-wii/--train-wee`
+  进化 I/E 对称自增益基因）：驱动上升→τ 小（响应优先）、被抑制下降→τ 大（保留
+  优先）——正常口径成绩 1.8×（7.17 vs 3.92 @pop256×100）、步内保留率 3.5×；
+- **代价与边界**：泄漏积分器的惯性运动成本在快速训练尺度下使成绩仍低于反应式
+  基线（7.17 vs 35）；τ 维度呈"中性平台"进化无法自行跨越；"食物瞥见"POMDP 任务
+  存在覆盖巡逻混淆解（详见实验C）。**记忆的构造与利用仍是开放问题。**
+
+### 5. 公式反哺权重：可行但代价灾难性（test18 系列）
+
+与"网络→公式"的正向蒸馏相反，test18 把 V5 三算符公式做成**一致性选择压力**，
+反向灌回 256 列 E/I 网络（`experiments/test18_formula_distill/`，
+`docs/test18_formula_distill_experiment_log.md`）：
+
+- **可行**：字典序一致度键在 8 代内把 7b 热启动模型的公式一致率从 0.51 抬到 0.80
+  （平台 0.83）；零状态分层一致率全层 0.74–0.87（每层超"恒直行地板" +0.08~0.14，
+  连 7b 基线最弱的长蛇拓扑段也被吸收）；从零进化同样稳定爬升（0.34→0.71）。
+  信号干净：固定状态库主键免疫早死博弈、σ_ε 无塌缩；
+- **但闭环灾难性下降**：同种子同预算下纯公式键臂闭环均值仅 38.13、退火臂 51.14，
+  均低于纯分数对照 57.40，更远低于公式本体 96.17——**每步 ~80% 一致在数百步上
+  复合（0.8^200≈0），轨迹在进入长蛇段前必然发散**；纯公式键从零训练均值 0.77
+  （只学会短蛇段直行）；
+- **本质**：V5 公式不是反应式策略，而是每步洪泛枚举 R（未来头尾连通）/G（食物
+  可达）的**搜索算法**——蒸成网络时首先丢失的正是长时程搜索，只剩单步决策的
+  表象。因此"只留公式就退化为搜索脚本，只留网络就拿不到公式的闭环分"。
+
+结论：反向蒸馏在本规模"可行但不划算"（更适合做结构热启动或一致性正则项，而非
+主选择压力），瓶颈在链式复合误差与表征、不在可分性。**公式反哺的乐观口径不作为
+本仓库结论，权威口径以上述实验日志为准。**
 
 ---
 
@@ -194,8 +241,9 @@ pip install python-louvain        # 可选：可视化社区检测
 验证环境：
 
 ```bash
-python snake_std.py --selfcheck     # 14 组自检（适应度公式/CRN 确定性/稀疏等价/
-                                    # 观测等价/激素等价/鲁棒机制/池约束/固定地图）
+python snake_std.py --selfcheck     # 18 组自检（适应度公式/CRN 确定性/稀疏等价/
+                                    # 观测等价/激素等价/鲁棒机制/池约束/固定地图/
+                                    # K帧消融/w_ii与自连/E泄漏积分器/w_ee）
 python snake_std.py --smoke         # 3 代端到端冒烟
 ```
 
@@ -215,6 +263,13 @@ python snake_std.py --gens 320
 
 默认配置：**32ego 观测、simple 适应度、N=256 / K=96**、pop 4096 / 精英 1024、
 K1=12 → 保 2048 → 对半精评（A=6/B=18）、LCB 选择键、CRN 开、fast-eval 开。
+```bash
+# 以根目录示例权重为种子继续进化（7b 后训练模，全种群注入）
+python snake_std.py --seed-model cheat7b_win_model.pth --seed-pop --obs 32proj --gens 320
+# 播放示例权重（--play-model 支持根目录三个示例权重；7b 稠密基模自动转换）
+python snake_std.py --play --play-model cheat7b_win_model.pth --obs 32proj
+```
+
 激素/轮换/池约束等全部关闭（未证明有益，见[重要结论](#重要结论)与开关矩阵）。
 
 ### 播放与可视化
@@ -290,6 +345,9 @@ python experiments/test7_series/test7b_benchmark.py          # 经典 7b 冠军
 | `--weak-mask-frac` | 评估期弱连接屏蔽 |
 | `--no-fast-eval` | 关闭 fast-eval（回退逐字对拍路径） |
 | `--no-one-sided-death` | 关闭单侧转弯判死 |
+| `--kframe-input / --kframe-read` | **研究选项**（test17）：K帧输入 `decay`(默认)/`first`（仅首帧喂观测）与读出 `sum`(默认)/`tail`（仅尾帧）；`--frame-rate` 可调 K |
+| `--euler-leak` | **研究选项**（test17B'）：E 泄漏积分器 `E=σ(·+w_ee·E)+τ·E`（τ≤1，st σ迹负反馈），构造性长记忆（FITNESS v27） |
+| `--train-wii / --train-wee` | **研究选项**：进化 I/E 对称自反馈基因（对角，零初始化≡无，G2 组） |
 | `--columns / --fanin` | 柱数 N（默认 256）/ 扇入 K（默认 96，≥64 无明显损失） |
 | `--pop / --elite / --gens` | 种群 / 精英（亲本）数 / 代数 |
 | `--seed-model [--seed-pop]` | 种子模型注入（单行/全种群克隆） |
@@ -335,14 +393,45 @@ brain, cfg, meta = einbrain.io.load_model_any('test16b_simp_best_model.pth')
 
 ## 预训练模型
 
+**示例种子权重（根目录，标准实现随时快速调用）**：
+
+| 文件 | 血统 | 口径 | 用途 |
+|---|---|---|---|
+| `cheat7b_win_model.pth` | test16c 后训练（7b 迁移稀疏 K=96 + 固定地图特化） | obs32proj / N256 / **98/98 整版通关** | `--seed-model` 微调起点 / `--play` 演示 |
+| `test7b_base_model.pth` | test7b 基模（稠密基因组） | obs32proj / N256 / 千局 61.4 | 注入时**自动稠密→稀疏 K=96 转换**（实测无损，10 局 54.6） |
+| `test16b_simp_best_model.pth` | test16b 旗舰 | obs40 / N1024 稀疏 K=16 | 千局 **62.7** |
+
+```bash
+# 以 7b 后训练模为种子继续进化（全种群注入）
+python snake_std.py --seed-model cheat7b_win_model.pth --seed-pop --obs 32proj --gens 320
+# 直接播放示例权重（7b 稠密基模自动转换后播放）
+python snake_std.py --play --play-model test7b_base_model.pth --obs 32proj
+```
+
+各血统归档模型（原件均保留在 artifacts/ 下）：
+
 | 模型 | 位置 | 口径 |
 |---|---|---|
-| **test16b_simp**（旗舰） | `test16b_simp_best_model.pth`（根目录） | 千局均值 **62.7**；N=1024 稀疏 K=16，obs40 |
-| test7b 冠军 | `artifacts/test7b/test7b_best_model.pth` | 训练期 67.0 / 千局 61.4；N=256 稠密，obs32 投影 |
-| cheat7b 通关模型 | `artifacts/test16c_cheat7b/` | 7b 迁移稀疏 K=96 + 固定地图整版通关 |
+| test7b 冠军（基模原件） | `artifacts/test7b/test7b_best_model.pth` | 训练期 67.0 / 千局 61.4；N=256 稠密，obs32 投影 |
+| cheat7b 通关模型（原件） | `artifacts/test16c_cheat7b/` | 7b 迁移稀疏 K=96 + 固定地图整版通关 |
 | 16b 变体（mB0/mB1/e32 扇入扩容） | `artifacts/test16b/` | 见 docs/test16b 日志 |
 | test12/14/15 各世代 best | `artifacts/test12…15/` | 32ego → 40tailflood 演化链 |
+| test17 系列各臂（研究选项） | `artifacts/test17/` | 见 docs/test17 日志 |
+| test18 公式反哺各臂（研究） | `artifacts/test18_formula_distill/` | 见 docs/test18 日志 |
 | 早期（test4b–test8） | `models/` | LSTM 预训练柱 / 24 维时代 |
+
+**超出 GitHub 单文件限额的大文件未入库**（test5b/5c 数据集、test7a 五臂与
+test7h 各臂权重），可按脚本重新生成：
+
+```bash
+python experiments/test5b/collect_data.py        # dataset.npz
+python experiments/test5c/collect_crisis.py      # crisis_dataset.npz + dataset_combined.npz
+# test7a 五臂：--tag 依次取 r0_control / rfix / v2_a / v2_b / v2_base
+python experiments/test7_series/run_arm.py --tag r0_control --obs 24 --fit tuple
+python experiments/test7_series/anneal_ab.py     # test7h ANNEAL05/FREE
+python experiments/test7_series/imitation_ab.py  # test7h imit B/C
+python experiments/test7_series/prox_ab.py       # test7h prox P15/P30
+```
 
 ---
 
@@ -352,6 +441,8 @@ brain, cfg, meta = einbrain.io.load_model_any('test16b_simp_best_model.pth')
 SiNNtry/
 ├── snake_std.py                  ★ 标准实现（唯一训练入口）
 ├── test16b_simp_best_model.pth   ★ 基准模型
+├── cheat7b_win_model.pth         ★ 示例种子权重（7b 后训练，98/98 通关）
+├── test7b_base_model.pth           示例种子权重（7b 基模，稠密，注入自动转换）
 ├── einbrain/                     通用库（config/env/brain/dynamics/evolve/neat/ppo/gpu/io/vis）
 ├── experiments/                  历史实验源码（按谱系归档）
 │   ├── early/                      test1–6 家族
@@ -359,6 +450,9 @@ SiNNtry/
 │   ├── test8_neat/                 NEAT × EI-RNN
 │   ├── test10_lunar/ test11/ test12/ test13_ppo/ test14/ test15/
 │   ├── test16_series/              16 系列全家 + 基准/扩容/迁移/对拍
+│   ├── test17_kft/                 test17 系列 fork（泄漏积分器）+ 记忆探针
+│   ├── test18_formula_distill/     公式反哺权重（V5 教师门 + 一致度选择压力）
+│   ├── v5_formula/                 V5 最终三算符公式单文件运行器（test18 教师参照）
 │   └── run_seeded.py               旧脚本种子注入运行器
 ├── artifacts/                    各世代模型/曲线产物（按世代分目录）
 ├── tools/                        brain_visualizer 实时可视化 + video/ 视频制作
@@ -392,7 +486,9 @@ python experiments/test16_series/test16c_cheat7b.py --smoke
 | `docs/test14_experiment_log.md` | 激素 v1 与"精英通胀"判定方法学 |
 | `docs/test15_experiment_log.md` | 观测 32→40 增维：标定、A/B、冷启动消融 |
 | `docs/test16b_experiment_log.md` | 稀疏基因组、fast-eval、对半精评、结构对比、扇入扩容 |
-| `docs/standard_implementation_log.md` | **snake_std 标准实现**：开关矩阵 + 14 组自检 + 等价门 |
+| `docs/test17_kft_experiment_log.md` | test17 系列（K帧消融→泄漏积分器→瞥见POMDP）：收缩映射诊断、记忆的构造与代价、τ 平台 |
+| `docs/test18_formula_distill_experiment_log.md` | 公式反哺权重（V5 一致度选择压力）：可进化但闭环灾难性下降，链式复合误差与搜索退化 |
+| `docs/standard_implementation_log.md` | **snake_std 标准实现**：开关矩阵 + 18 组自检 + 等价门 + 移植保真门 |
 
 ---
 
